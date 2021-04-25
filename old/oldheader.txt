@@ -1,0 +1,44 @@
+;APS00000000000000000000000000000000000000000000000000000000000000000000000000000000
+******************************************************
+* Project	: Asm-Pro (OpenSource Edition)
+* Start Date	: 30-Dec-1996
+* Author	: Solo/GeNeTiC
+*
+* Binary Version: 1.18
+* Source Version: 1.18 (opensource release)
+* Project	: Asm-Pro (OpenSource Edition)
+*
+* Updates/People contributing to the opensource release:
+*
+* 05-april-2012 ; v1.18 (Apollo edition)
+* - Rune Stensland (SP)
+*
+* 02-May-2005	: v1.17
+* - Franck "Flasher Jack" Charlet
+*
+* 24-Feb-2001	: v1.16i0
+* - Aske Simon Christensen aka Blueberry
+* - Franck "Flasher Jack" Charlet
+*
+* 04-Feb-2001	: v1.16h
+* - Boussh/TFA
+* - Franck "Flasher Jack" Charlet
+* - Solo
+*
+* 08-Aug-2000	: v1.16g
+* - Aske Simon Christensen azka Blueberry
+* - Solo
+*
+* 04-Mar-2000	: v1.16f (Initial Source release date)
+* - Solo
+*
+* Check the Asm-Pro_History.txt for changes..
+*
+* JOIN OUR ASM-PRO DEV MAILING LIST NOW! 
+* Coordinate the efforts on the development of Asm-Pro.
+*
+* Subscribe: Asmpro_dev-subscribe@yahoogroups.com 
+* URL to discussion page: http://groups.yahoo.com/group/Asmpro_dev
+*
+******************************************************
+
