@@ -1,4 +1,4 @@
-;APS0008559A000854BE000851F900086A2C000160FE000AEDB2000003B300066073000151F50000449A
+;APS0007D7BD000DDF25000DDD62000E0547000E06CB000AEE38000003D8000660D10001537E00004602
 ******************************************************
 *
 * TODO:
@@ -7,17 +7,15 @@
 *	* jump to previous "label"
 *	* ctrl+del in commandline
 *	* figure out amiga+whatever key handling
-*	* update default color palette
-*	* update default syntax palette
 *	* fix pink block if startup screen is shown
 *	* cursor in menubar
+*	* fix scroll position when pasting
 *
 * SOMEDAY:
 *	* undo/redo
 *	* backwards selection
 *	* backwards search
 *	* fix "Debug" switch (?)
-*	* finish clipboard stuff
 *
 * DONE:
 *	* ctrl+back & ctrl+del
@@ -32,6 +30,9 @@
 *	* ctrl+back working in line edit mode
 *	* delete dead code (plugins, slider, PPC, M020)
 *	* ctrl+shift+u = search word under cursor
+*	* update default color palette
+*	* update default syntax palette
+*	* finish clipboard stuff
 *
 ******************************************************
 
@@ -53,16 +54,19 @@ Debugstuff		= TRUE	; Use this option to activate debug window
 				; prefs file when activated.
 				
 MEMSEARCH		= TRUE
-CLIPBOARD		= FALSE		; (not finished)
+CLIPBOARD		= TRUE
 INCLINK			= TRUE
+AMIGA_GUIDE		= FALSE		; probably going to delete this feature
+NEW_SELECT		= FALSE		; doesn't work yet
+DISLIB			= FALSE
 
 MAX_REPT_LEVEL		=	50	; 10
 MAX_INCLUDE_LEVEL 	=	20	; 10
 MAX_CONDITION_LEVEL 	=	100	; 20
 MAX_MACRO_LEVEL		=	100	; 25
 
-	TTL	"TRASH'M-Pro by ME"
-	IDNT 	"TRASH'M_Pro by ME"
+	TTL	"TRASH'M-Pro"
+	IDNT 	"TRASH'M_Pro"
 
 **************************
 *** Externals includes ***
@@ -73,6 +77,8 @@ MAX_MACRO_LEVEL		=	100	; 25
 	include	"libraries/asl.i"
 	include	"libraries/reqtools.i"
 	include	"devices/keymap.i"
+	;include	"exec/tasks.i"
+
 	include	"libraries/reqtools_lib.i"
 	include	"exec/exec_lib.i"
 	include	"dos/dos_lib.i"
@@ -85,9 +91,22 @@ MAX_MACRO_LEVEL		=	100	; 25
 	include "libraries/keymap_lib.i"
 	include "libraries/console_lib.i"
 	include "libraries/diskfont_lib.i"
+
+	IF	AMIGA_GUIDE
 	include "libraries/amigaguide_lib.i"
+	ENDIF
+
+	IF	CLIPBOARD
 	include	"devices/clipboard.i"
-	include	"exec/tasks.i"
+	include	"libraries/iffparse.i"
+	include	"libraries/iffparse_lib.i"
+	ENDIF
+
+	IF	DISLIB
+	include	"libraries/disassembler.i"
+	include	"libraries/disassembler_lib.i"
+	ENDIF
+
 
 version: macro
 	dc.b	'V1.00'
@@ -264,6 +283,7 @@ MODE_15=%100000000000000	;$4000
 
 
 	SECTION	TRASHMPro_Startup,CODE
+
 ProgStart:
 	movem.l	d0-a6,-(sp)
 	bsr.w	Init_Filtertable
@@ -273,9 +293,9 @@ ProgStart:
 	lea	(Variable_base).l,a4
 	lea	ConvTabel3+256(pc),A0
 	move	#256-1,d0
-.lopje:
-	move.b	-(a0),(Variable_base-DT,a4,d0.w)
-	dbra	d0,.lopje
+
+.loop	move.b	-(a0),(Variable_base-DT,a4,d0.w)
+	dbra	d0,.loop
 
 	clr.l	(DATA_RETURNMSG-DT,a4)
 	sub.l	a1,a1
@@ -315,7 +335,6 @@ ProgStart:
 ;	bset	#4,d0
 ;	bset	#5,d0
 ;No_68040:
-	; ***
 	moveq	#0,d1
 	btst	#4,d0
 	beq.b	.fputype
@@ -340,13 +359,13 @@ ProgStart:
 	move.l	d0,a1
 	jsr	(_LVOSplitName,a6)
 	movem.l	(sp)+,d0-a6
-	tst.l	($00AC,a5)		;test of opgestart van CLI
+	tst.l	($00AC,a5)		; started from CLI?
 	beq.b	JepWBstartup
 
 	clr	(KeyboardOutBuf-DT,a4)
 	clr	(KeyboardInBuf-DT,a4)
 	jsr	(DATAFROMSTART).l
-	move.l	(sp)+,a6		;doslib
+	move.l	(sp)+,a6		; doslib
 	moveq	#0,d1
 	jsr	(_LVOCurrentDir,a6)
 	move.l	d0,(CurrentDir).l
@@ -359,14 +378,15 @@ ProgStart:
 	bra.b	DuplockDir
 
 .DosName:	dc.b	"dos.library",0
+	even
 
 Init_Filtertable:
 	lea	(Variable_base).l,a0
 	lea	(EndVarBase).l,a1
-.lopje:
-	clr.b	(a0)+
+
+.loop	clr.b	(a0)+
 	cmp.l	a0,a1
-	bne.b	.lopje
+	bne.b	.loop
 	rts
 
 doslib_error:
@@ -383,7 +403,7 @@ doslib_error:
 	rts
 
 JepWBstartup:
-	MOVE.L	$0084(A5),StackSize	;stacksize van icoontje
+	MOVE.L	$0084(A5),StackSize	; stacksize from icon
 	lea	($005C,a5),a0
 	move.l	(4).w,a6
 	jsr	(_LVOWaitPort,a6)
@@ -406,15 +426,15 @@ DuplockDir:
 	move.l	(a0),d3
 	clr.l	(a0)
 
-	MOVE.L	StackSize,D4
-	CMP.L	#20*1024,D4		;just for people who need more
-	bhs.s	CreateProc		;(like me)..
-	move.l	#32*1024,D4		;32k should do..
+	move.l	StackSize,D4
+	cmp.l	#20*1024,D4		; just for people who need more
+	bhs.s	CreateProc		; (like me)..
+	move.l	#32*1024,D4		; 32k should do..
 CreateProc:
 
-	MOVE.L	D4,_StackSize
+	move.l	D4,_StackSize
 
-	jsr	(_LVOCreateProc,a6)	;(naam-d1,pri-d2,seglist-d3,stacksize-d4) ; ***
+	jsr	(_LVOCreateProc,a6)	;(naam-d1,pri-d2,seglist-d3,stacksize-d4)
 
 	move.l	a6,a1
 	move.l	(4).w,a6
@@ -460,6 +480,7 @@ realend1:
 ;***********************************************
 
 	SECTION	TRASH288,CODE
+
 REAL:
 	clr.b	(MyBits-DT,a4)
 	clr.b	(ScBits-DT,a4)
@@ -477,7 +498,7 @@ REAL:
 	move.l	($009C,a1),($009C,a5)		;set i/o over to current task
 	move.l	($00A0,a1),($00A0,a5)
 	move.l	($00AC,a1),($00AC,a5)
-	bsr.w	MakeItAllHappen
+	bsr.w	Initialize
 
 	move.l	(DATA_TASKPTR-DT,a4),a5
 	move.l	(DATA_OLDREQPTR-DT,a4),($00B8,a5)
@@ -485,6 +506,7 @@ REAL:
 	lsr.l	#2,d1
 	move.l	(DosBase-DT,a4),a6
 	jmp	(_LVOUnLoadSeg,a6)
+
 
 TRASH.MSG:		dc.b	"TRASH'M-Pro",0
 ENVARCTRASHP.MSG:
@@ -498,7 +520,7 @@ RecentFilesNbr:		dc.b	0
 			cnop 0,4
 SREGSDATA.MSG:		dc.b	'TRASH:REGSDATA',0
 RegsDataSDir:		dc.b	'S:REGSDATA',0
-Sorrythisvers.MSG:	dc.b	"Sorry, TRASH'M-Pro requires kickstart 2.04 or higher !!",$A,$D,0
+Sorrythisvers.MSG:	dc.b	"Sorry, TRASH'M-Pro requires kickstart 2.04 or higher!!!!!!",$A,$D,0
 			cnop	0,4
 CurrentDir:		dc.l	0
 
@@ -583,7 +605,7 @@ imagestr:
 	dc.l	0			; ig_NextImage
 
 
-MakeItAllHappen:
+Initialize:
 	move.b	#1,(EVENT_IECLASS-DT,a4)
 	move.l	sp,(DATA_USERSTACKPTR-DT,a4)
 	move.l	#$FFFFFFFF,(AsmErrorTable-DT,a4)
@@ -597,33 +619,42 @@ MakeItAllHappen:
 	jsr	opendoslib
 	jsr	opengadtlib
 	jsr	openasllib
+	jsr	openifflib
+	jsr	opendislib
+
+	IF	CLIPBOARD
+	jsr	Clip_Setup
+	ENDIF
 	
-C40E:
+Initialize_FromRestart:
 	jsr	clear_all
 
 	move.w	#0,(Cursor_col_pos-DT,a4)
 	move.w	#0,(cursor_row_pos-DT,a4)
 
 	move.w	#11,d7			; set initial cmdline position
-.lopje:
-	moveq.l	#10,d0
-	jsr	SENDONECHARNORMAL
-	dbf	d7,.lopje
+.loop:	moveq.l	#10,d0
+	jsr	Print_Char
+	dbf	d7,.loop
+
+	lea	TRASH_TEXT,a0		; print welcome message ;)
+	jsr	Print_Text_Centered
+	jsr	Print_NewLine
 
 	tst.b	(HomeDirectory-DT,a4)
-	beq.b	C4C2
+	beq.b	.C4C2
 	tst.b	(B2E17E-DT,a4)
-	beq.b	C4C2
+	beq.b	.C4C2
 	clr.b	(B2E17E-DT,a4)
 	lea	(HomeDirectory-DT,a4),a0
 	move.l	a0,_dirstringTags+4
-C4C2:
+.C4C2:
 	tst.b	(B30175-DT,a4)
-	beq.b	C4DA
+	beq.b	.ok
 	lea	(Erroropeningr.MSG).l,a0
 	jsr	(beeldtextaf).l
-C4DA:
-	jsr	LoadRecentFiles
+
+.ok:	jsr	LoadRecentFiles
 
 	move.l	(GfxBase-DT,a4),a6
 	move.l	(Rastport-DT,a4),a1
@@ -662,7 +693,7 @@ PRIVILIGE_VIOL1:
 CriticalError:
 	movem.l	(sp)+,d0-d7/a0-a6
 	move.l	(DATA_USERSTACKPTR-DT,a4),sp
-	jsr	(DEBUG_CLEAR_BP_BUFFER).l
+	jsr	(Zap_Breakpoints).l
 	move.l	#L2DF4C,(USP_base-DT,a4)
 	move.l	#L2CF4C,(SSP_base-DT,a4)
 	clr	(statusreg_base-DT,a4)
@@ -673,13 +704,12 @@ CriticalError:
 SupervisorRoutine:
 	move.l	sp,(DATA_SUPERSTACKPTR-DT,a4)
 	tst	(ProcessorType-DT,a4)
-	beq.b	.mc68000
+	beq.b	.68k
 	move.l	a0,-(sp)
 	movec	vbr,a0
 	move.l	a0,(VBR_base_ofzo-DT,a4)
 	move.l	(sp)+,a0
-.mc68000:
-	rte
+.68k:	rte
 
 ;;***********************************************
 ;*	      EDITOR HANDLE ROUTINES		*
@@ -691,101 +721,100 @@ InsertText:
 	move.l	(FirstLinePtr-DT,a4),a2
 	move.l	a2,a3
 	tst.l	d3
-	beq.b	.InEnd
+	beq.b	.end
 	move.l	d3,a1
 	movem.l	d2/d3,-(sp)
-	bsr.w	EDITOR_MAKEHOLE_A1LONG
+	bsr.w	E_ExtendCutBuffer
 	movem.l	(sp)+,d2/d3
 	move.l	d3,d1
 	bsr.w	MOVEMARKS
 	move.l	d2,a0
 	subq.w	#1,d3
 	moveq	#$20,d1
-.lopje:
-	move.b	(a0)+,d0
+
+.loop:	move.b	(a0)+,d0
 	cmp.b	d1,d0
 	bcc.b	.tab
 	cmp.b	#9,d0
 	beq.b	.tab
 	moveq	#0,d0
-.tab:
-	move.b	d0,(a2)+
-	dbra	d3,.lopje
+
+.tab:	move.b	d0,(a2)+
+	dbra	d3,.loop
 	move.l	a2,(FirstLinePtr-DT,a4)
-.InEnd:
-	movem.l	(sp)+,d0-d6/a0-a3/a5/a6
+
+.end:	movem.l	(sp)+,d0-d6/a0-a3/a5/a6
 	rts
 
 ; ----
 GoBack1Line:
 	moveq	#1,d1
-	bra.w	MoveupNLines
+	bra.w	MoveUpNLines
 
 ; ----
-MoveupNLines:
+MoveUpNLines:
 	move.l	(FirstLinePtr-DT,a4),a0
 	cmp.l	a3,a0
-	bne.b	.lopje
+	bne.b	.loop
 	move.l	a2,a0
-.lopje:
-	move.b	-(a0),d0
-	cmp.b	#$19,d0
-	beq.b	.ReachedStart
+
+.loop:	move.b	-(a0),d0
+	cmp.b	#$19,d0			; BOF
+	beq.b	.bof
 	cmp.l	a3,a0
 	bne.b	.skip
 	move.l	a2,a0
-.skip:
-	tst.b	d0
-	bne.b	.lopje
+
+.skip:	tst.b	d0
+	bne.b	.loop
 	subq.l	#1,(FirstLineNr-DT,a4)
-	dbra	d1,.lopje
+	dbra	d1,.loop
 	sub.l	#$10000,d1
-	bcc.b	.lopje
+	bcc.b	.loop
 	
 	addq.l	#1,(FirstLineNr-DT,a4)
-.ReachedStart:
-	addq.l	#1,a0
+
+.bof:	addq.l	#1,a0
 	move.l	a0,(FirstLinePtr-DT,a4)
 	rts
 
 ; ----
 MoveDownNLines:
 	move.l	(FirstLinePtr-DT,a4),a0
-.lopje:
-	cmp.l	a2,a0
+
+.loop:	cmp.l	a2,a0
 	bne.b	.skip
 	move.l	a3,a0
-.skip:
-	move.b	(a0)+,d0
-	cmp.b	#$1A,d0
+.skip:	move.b	(a0)+,d0
+	cmp.b	#$1A,d0			; EOF
 	beq.b	.end
-	tst.b	d0
-	bne.b	.lopje
+	tst.b	d0			; EOL
+	bne.b	.loop
 	addq.l	#1,(FirstLineNr-DT,a4)
 	move.l	a0,(FirstLinePtr-DT,a4)
-	dbra	d1,.lopje
+	dbra	d1,.loop
 	sub.l	#$10000,d1
-	bcc.b	.lopje
-.end:
-	rts
+	bcc.b	.loop
+
+.end:	rts
 
 ; ----
 BeginNextLine:
 	move.l	(FirstLinePtr-DT,a4),a0
-.lopje:
-	cmp.l	a2,a0
+
+.loop:	cmp.l	a2,a0
 	bne.b	.skip
 	move.l	a3,a0
-.skip:
-	move.b	(a0)+,d0
-	cmp.b	#$1A,d0
+
+.skip:	move.b	(a0)+,d0
+	cmp.b	#$1A,d0			; EOF
 	beq.b	.end
-	tst.b	d0
-	bne.b	.lopje
+	tst.b	d0			; EOL
+	bne.b	.loop
 	addq.l	#1,(FirstLineNr-DT,a4)
 	move.l	a0,(FirstLinePtr-DT,a4)
-.end:
-	rts
+
+.end:	rts
 
 ;******************************
 ;***     ESCAPE PRESSED     ***
@@ -813,17 +842,17 @@ ACTIVATEEDITORWINDOW:
 	bset	#SB3_EDITORMODE,(SomeBits3-DT,a4)	; in editor
 	bclr	#MB1_INCOMMANDLINE,(MyBits-DT,a4)	; from commandline
 
-	jsr	(PRINT_CLEARSCREEN).l
+	jsr	(Print_ClearScreen).l
 	move.b	#$FF,(B2BEB8-DT,a4)
-	bsr.w	E_RemoveCutMarking
+	bsr.w	E_RemoveMark
 	move.l	(FirstLinePtr-DT,a4),a2
 	move.l	a2,a3
 	moveq.l	#0,d1
 	move	(NrOfLinesInEditor-DT,a4),d1
 	lsr.w	#1,d1
-	bsr.w	MoveupNLines
+	bsr.w	MoveUpNLines
 	moveq	#0,d0
-	jsr	(SENDONECHARNORMAL).l
+	jsr	(Print_Char).l
 	jsr	(PrintStatusBalk).l
 	jsr	Show_Cursor
 	movem.l	d0-d7/a0-a6,(EditorRegs-DT,a4)
@@ -832,26 +861,22 @@ ACTIVATEEDITORWINDOW:
 	cmp.l	#1,(FirstLineNr-DT,a4)
 	bne.b	.noFirst
 	tst.l	(LineFromTop-DT,a4)
-	bne.b	.noFirst
-	bsr.w	C1382
-	tst.b	(B30047-DT,a4)
-	beq.b	.noFirst
-	bsr.w	RegTab_SETALLNOTUPD
+	bne.w	.noFirst
 .noFirst:
 	bsr.w	EDITSCRPRINT
-	jsr	(messages_get).l
+	jsr	(IO_GetKeyMessages).l
 	jsr	(GETKEYNOPRINT).l
 
 	bsr.w	EDITOR_PUTMACRO
 	cmp.b	#$1B,d0			;ESC
-	beq.w	EDITOR_ESCPRESSED
+	beq.w	E_EscPressed
 	pea	(.EventLoopje,pc)	;set return
 
 	cmp.b	#$80,d0			;esc flag
 	beq.b	ESC_KEYCODE
 	jsr	RESETMENUTEXT
 	cmp.b	#$7F,d0			;DEL
-	beq.w	Delete
+	beq.w	E_Delete
 	cmp.b	#$1F,d0			;normal text
 	bhi.w	EDITOR_INSERTCHAR_SETNS
 	cmp.b	#9,d0			;TAB
@@ -859,7 +884,7 @@ ACTIVATEEDITORWINDOW:
 	cmp.b	#13,d0			;CR
 	beq.w	EDITOR_ReturnPressed
 	cmp.b	#8,d0			;BS
-	beq.w	EDITOR_Backspace
+	beq.w	E_Backspace
 	cmp.b	#10,d0			;LF
 	beq.w	EDITOR_UPRETURNPRESSED
 	rts
@@ -892,15 +917,15 @@ Editor_commands_table:
 	dr.w	E_Jump1WordForth	;ALT RIGHT
 	dr.w	E_Assembler_prefs	;ALT DOWN
 	dr.w	E_MoveCursor2Top	;NUMPAD_5
-	dr.w	EDITOR_ESCPRESSED	;AMIGA ESC
+	dr.w	E_EscPressed		;AMIGA ESC
 	dr.w	E_DeleteWordForwards	;CTRL DEL
 	dr.w	E_DeleteWordBackwards	;CTRL BACK
 	dr.w	E_Comment		;Amiga+;
 	dr.w	E_UnComment		;Amiga+:
 	dr.w	E_100LinesUp		;Amiga+a
-	dr.w	E_Mark_blok		;Amiga+b	20
-	dr.w	E_Copy_blok		;Amiga+c
-	dr.w	E_Delete_blok		;Amiga+d
+	dr.w	E_SetMark		;Amiga+b	20
+	dr.w	E_CopyBlock		;Amiga+c
+	dr.w	E_DeleteBlock		;Amiga+d
 	dr.w	E_Jump2Error		;Amiga+e
 	dr.w	E_ClipPast		;Amiga+f	24 fill
 	dr.w	E_Grab_word		;Amiga+g
@@ -910,7 +935,7 @@ Editor_commands_table:
 	dr.w	E_UsedRegisters		;Amiga+k
 	dr.w	E_LowercaseBlock	;Amiga+l	30
 	dr.w	E_DoMacro		;Amiga+m
-	dr.w	E_SmartPast		;Amiga+n
+	dr.w	E_SmartPaste		;Amiga+n
 
 	dr.w	EDITOR_UPRETURNPRESSED	;Amiga+o
 	dr.w	E_Tabulate		;Amiga+p
@@ -918,11 +943,11 @@ Editor_commands_table:
 	dr.w	E_RepeatReplace		;Amiga+r
 	dr.w	E_Search		;Amiga+s
 	dr.w	E_GotoTop		;Amiga+t
-	dr.w	E_RemoveCutMarking	;Amiga+u
+	dr.w	E_RemoveMark	;Amiga+u
 	dr.w	E_Fill			;Amiga+v	40 past
 	dr.w	E_UpdateSource		;Amiga+w	41 was block write
-	dr.w	E_Cut_Block		;Amiga+x	***
-	dr.w	E_Rotate_Block		;Amiga+y	***
+	dr.w	E_CutBlock		;Amiga+x	***
+	dr.w	E_RotateBlock		;Amiga+y	***
 	dr.w	E_100LinesDown		;Amiga+z
 
 	dr.w	E_ExitEditor		;Amiga+A	45
@@ -930,8 +955,8 @@ Editor_commands_table:
 	dr.w	E_not_used		;Amiga+C
 	dr.w	E_ExitEditor		;Amiga+D
 	dr.w	E_not_used		;Amiga+E
-	dr.w	E_Delete2eol		;Amiga+DEL	50
-	dr.w	E_Delete2bol		;Amiga+BACK
+	dr.w	E_Delete2EOL		;Amiga+DEL	50
+	dr.w	E_Delete2BOL		;Amiga+BACK
 	dr.w	E_SearchWordUnderCursor ;Amiga+.
 	;dr.w	E_not_used		;Amiga+I
 	dr.w	E_Jump2NextLabel	;CTRL+I
@@ -939,15 +964,13 @@ Editor_commands_table:
 	dr.w	E_SpaceToTabBlock	;Amiga+K
 	dr.w	E_UppercaseBlock	;Amiga+L	56
 	dr.w	E_ExitEditor		;Amiga+M	57
-	dr.w	E_not_used		;Amiga+N
+	dr.w	E_Jump2NextLabel	;CTRL+N
 	dr.w	E_ExitEditor		;Amiga+O
-	dr.w	E_not_used		;E_Showplugs	;Amiga+P	60
+	dr.w	E_Jump2PreviousLabel	;CTRL+P		60
 	dr.w	E_not_used		;Amiga+Q
 	dr.w	E_Replace		;Amiga+R
 	dr.w	E_Search2		;Amiga+S
 	dr.w	E_GotoBottom		;Amiga+T
-	;dr.w	E_not_used		;Amiga+U
-	;dr.w	E_Jump2PreviousLabel	;CTRL+U
 	dr.w	E_SearchWordUnderCursor ;CTRL+U
 	dr.w	E_not_used		;Amiga+V
 	dr.w	E_WriteBlock		;Amiga+W	67
@@ -971,7 +994,7 @@ Editor_commands_table:
 	dr.w	E_MouseMovement		;mouse movement
 	dr.w	E_CreateMacro		;Amiga ,
 
-	dr.w	RegTab_SETALLNOTUPD	;
+	dr.w	LineTab_SETALLNOTUPD	;
 	dr.w	E_not_used		;
 
 	dr.w	E_Mark4			;Amiga $
@@ -1054,8 +1077,8 @@ CS_size			equ	256
 
 E_ChangeSource:
 	clr.l	(TempBuffer-DT,a4)
-	move.l	(Cut_Blok_End-DT,a4),d0
-	sub.l	(sourceend-DT,a4),d0
+	move.l	(Cut_Buffer_End-DT,a4),d0
+	sub.l	(SourceEnd-DT,a4),d0
 	ble.b	.dontcopy
 	addq.w	#1,d0
 	move.l	d0,(TempBufferSize-DT,a4)
@@ -1068,7 +1091,7 @@ E_ChangeSource:
 	beq.b	.dontcopy
 	move.l	d0,(TempBuffer-DT,a4)
 	movem.l	d0-a6,-(sp)
-	move.l	(sourceend-DT,a4),a0
+	move.l	(SourceEnd-DT,a4),a0
 	move.l	(TempBuffer-DT,a4),a1
 	move.l	(TempBufferSize-DT,a4),d0
 	addq.w	#1,a0
@@ -1089,8 +1112,8 @@ E_ChangeSource:
 	lsl.l	#8,d2
 	lea	(a0,d0.w),a1
 	lea	(a0,d2.w),a0
-	move.l	(sourceend-DT,a4),d0
-	sub.l	(sourcestart-DT,a4),d0
+	move.l	(SourceEnd-DT,a4),d0
+	sub.l	(SourceStart-DT,a4),d0
 	bls.w	C9C0
 	move.l	d0,(CS_length,a1)
 	movem.l	d1-a6,-(sp)
@@ -1115,7 +1138,7 @@ C956:
 	dbra	d7,C956
 	movem.l	(sp)+,d7/a1/a2
 	movem.l	d0-a6,-(sp)
-	move.l	(sourcestart-DT,a4),a0
+	move.l	(SourceStart-DT,a4),a0
 	move.l	(CS_length,a1),d0
 	move.l	(CS_start,a1),a1
 	move.l	(4).w,a6
@@ -1151,18 +1174,18 @@ C9BC:
 C9C0:
 	tst.l	(CS_start,a0)
 	beq.w	CA9A
-	move.l	(sourcestart-DT,a4),d0
+	move.l	(SourceStart-DT,a4),d0
 	add.l	(CS_length,a0),d0
-	move.l	d0,(sourceend-DT,a4)
+	move.l	d0,(SourceEnd-DT,a4)
 	addq.l	#1,d0
-	move.l	d0,(Cut_Blok_End-DT,a4)
+	move.l	d0,(Cut_Buffer_End-DT,a4)
 	move.l	(CS_FirstLinePtr,a0),(FirstLinePtr-DT,a4)
 	move.l	(CS_FirstlineNr,a0),(FirstLineNr-DT,a4)
 	move.l	(CS_FirstLineOffset,a0),(LineFromTop-DT,a4)
 	move	(CS_SomeBits,a0),(SomeBits-DT,a4)
 	move	(CS_AsmStatus,a1),(AssmblrStatus).l
 	movem.l	d0-a6,-(sp)
-	move.l	(sourcestart-DT,a4),a1	; dest
+	move.l	(SourceStart-DT,a4),a1	; dest
 	move.l	(CS_length,a0),d0	; size
 	movem.l	d0/a1,-(sp)
 	move.l	(CS_start,a0),a0	; source
@@ -1225,13 +1248,13 @@ CA8E:
 	bra.b	CAE4
 
 CA9A:
-	move.l	(sourcestart-DT,a4),a0
+	move.l	(SourceStart-DT,a4),a0
 	move.l	a0,(FirstLinePtr-DT,a4)
 	move.b	#0,(a0)+
 	move.b	#$1A,(a0)
-	move.l	a0,(sourceend-DT,a4)
+	move.l	a0,(SourceEnd-DT,a4)
 	move.b	#$1A,(a0)+
-	move.l	a0,(Cut_Blok_End-DT,a4)
+	move.l	a0,(Cut_Buffer_End-DT,a4)
 	move.l	#1,(FirstLineNr-DT,a4)
 	move.l	#0,(LineFromTop-DT,a4)
 	bclr	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
@@ -1247,35 +1270,35 @@ CAE4:
 	add.b	#$30,d0
 	move.b	d0,(SourceNrInBalk).l
 	movem.l	(sp)+,d0-d7/a0-a6
-	jsr	(RegTab_SETALLNOTUPD).l
+	jsr	(LineTab_SETALLNOTUPD).l
 	clr	(NewCursorpos-DT,a4)
 	move.b	#$FF,(B2BEB8-DT,a4)
-	jsr	(E_RemoveCutMarking).l
+	jsr	(E_RemoveMark).l
 	move.l	(FirstLinePtr-DT,a4),a2
 	move.l	a2,a3
 	moveq.l	#0,d1
 	move	(NrOfLinesInEditor-DT,a4),d1
 	lsr.w	#1,d1
-	jsr	(MoveupNLines).l
+	jsr	(MoveUpNLines).l
 	tst.l	(TempBuffer-DT,a4)
 	beq.b	CB8E
 	movem.l	d0-d7/a0-a6,-(sp)
-	move.l	(sourceend-DT,a4),d0
+	move.l	(SourceEnd-DT,a4),d0
 	add.l	(TempBufferSize-DT,a4),d0
 	cmp.l	(WORK_END-DT,a4),d0
 	bge.b	CB6A
-	move.l	(sourceend-DT,a4),a1
+	move.l	(SourceEnd-DT,a4),a1
 	addq.l	#1,a1
 	subq.w	#1,d0
 	move.l	(TempBuffer-DT,a4),a0
 	move.l	(TempBufferSize-DT,a4),d0
 	move.l	(4).w,a6
 	jsr	(_LVOCopyMem,a6)
-	move.l	(sourceend-DT,a4),a1
+	move.l	(SourceEnd-DT,a4),a1
 	add.l	(TempBufferSize-DT,a4),a1
 	subq.l	#1,a1
 	move.b	#$1A,(a1)
-	move.l	a1,(Cut_Blok_End-DT,a4)
+	move.l	a1,(Cut_Buffer_End-DT,a4)
 CB6A:
 	movem.l	(sp),d0-a6
 	;movem.l	d0-d7/a0-a6,-(sp)
@@ -1292,9 +1315,8 @@ CB8E:
 	rts
 
 CB96:
-	bsr.w	C1382
 	moveq	#0,d0
-	jsr	(SENDONECHARNORMAL).l
+	jsr	(Print_Char).l
 	jsr	(RESETMENUTEXT2).l
 	jmp	(PrintStatusBalk).l
 
@@ -1306,18 +1328,20 @@ CBAE:
 ;********** EINDE CHANGE SOURCE ***************
 
 E_OpenAmiGuide:
+	IF	AMIGA_GUIDE
 	movem.l	d0-a6,-(sp)
 	jsr	(AmigaGuideGedoe).l
 	movem.l	(sp)+,d0-a6
+	ENDIF
 	rts
 
 ; block comment
 E_Comment:
-	cmp.l	#-1,a6
-	beq.b	CC52
-	cmp.l	a2,a6
-	bge.b	CC52			;lame not backwards..
-;	cmp.l	a6,a2
+	cmp.l	#-1,a6			; no selection block
+	beq.b	.end
+	cmp.l	a2,a6			; mark > point?
+	bge.b	.end
+;	cmp.l	a6,a2			; no backwards...
 ;	bge.b	.ok
 ;	exg.l	a6,a2
 ;.ok:
@@ -1325,95 +1349,89 @@ E_Comment:
 	move.l	a6,(HelpBufPtrBot-DT,a4)
 	move.l	(FirstLinePtr-DT,a4),a6
 	bsr.w	E_Move2BegLine
-CBEC:
-	bsr.w	C14CC
+
+.l:	bsr.w	E_MoveBack2PrevLineBOL	; move to top of buffer
 	cmp.l	(HelpBufPtrBot-DT,a4),a2
-	bgt.b	CBEC
+	bgt.b	.l
 	bsr.w	E_Move2BegLine
-CBFA:
+
+.comment_line:
 	moveq	#';',d0
 	bsr.w	EDITOR_INSERTCHAR_SETNS
 	addq.l	#1,(HelpBufPtrTop-DT,a4)
 	cmp.l	a2,a6
-	bge.b	CC0A
+	bge.b	.skip
 	addq.l	#1,a6
-CC0A:
-	bsr.w	C14EC
-	cmp.b	#$1A,(a3)
-	beq.b	CC46
+.skip:	bsr.w	E_Move2EOL
+	cmp.b	#$1A,(a3)		; EOF
+	beq.b	.eof
 	bsr.w	E_Move2BegLine
 	cmp.l	(HelpBufPtrTop-DT,a4),a2
-	blt.b	CBFA
-CC1E:
-	move.l	a2,(FirstLinePtr-DT,a4)
+	blt.b	.comment_line
+
+.bot:	move.l	a2,(FirstLinePtr-DT,a4)
 	move.l	a2,-(sp)
 	move.l	(LineFromTop-DT,a4),-(sp)
 	move.l	(FirstLineNr-DT,a4),-(sp)
 	move.l	a6,a2
 ;	moveq	#0,d1
 	move.l	(LineFromTop-DT,a4),d1
-	bsr.w	MoveupNLines
+	bsr.w	MoveUpNLines
 	move.l	(sp)+,(FirstLineNr-DT,a4)
 	move.l	(sp)+,(LineFromTop-DT,a4)
 	move.l	(sp)+,a2
-	bra.w	E_RemoveCutMarking
+	bra.w	E_RemoveMark
 
-CC46:
-	bsr.w	E_Move2BegLine
+.eof:	bsr.w	E_Move2BegLine
 	moveq	#$3B,d0
 	bsr.w	EDITOR_INSERTCHAR_SETNS
-	bra.b	CC1E
+	bra.b	.bot
 
-CC52:
-	rts
+.end:	rts
 
 E_UnComment:
 	cmp.l	a6,a2
-	bls.w	E_RemoveCutMarking
+	bls.w	E_RemoveMark	; point is < mark
 	move.l	a2,d0
 	sub.l	a6,d0
 	move.l	d0,-(sp)
 	move.l	a6,-(sp)
-	bsr.w	E_RemoveCutMarking
+	bsr.w	E_RemoveMark
 	move.l	(sp)+,a1
-	bsr.w	E_JumpToA1
-	bra.b	CC74
+	bsr.w	E_JumpToA1		; jump to mark
+	bra.b	.skip
 
-CC6E:
-	move.l	d0,-(sp)
+.loop:	move.l	d0,-(sp)
 	bsr.w	E_NextCharacter
-CC74:
-	tst.b	(-1,a2)
-	bne.b	CC8C
+.skip:	tst.b	(-1,a2)
+	bne.b	.next			; EOL
 	cmp.b	#';',(a3)
-	bne.b	CC8C
-	bsr.w	Delete
+	bne.b	.next			; not ";"
+	bsr.w	E_Delete
 	move.l	(sp)+,d0
 	subq.l	#1,d0
-	beq.b	CC92
-	bra.b	CC8E
+	beq.b	.done
+	bra.b	.skip2
 
-CC8C:
-	move.l	(sp)+,d0
-CC8E:
-	subq.l	#1,d0
-	bne.b	CC6E
-CC92:
-	lea	(UncommentDone.MSG).l,a0
+.next:	move.l	(sp)+,d0
+.skip2:	subq.l	#1,d0
+	bne.b	.loop
+
+.done:	lea	(UncommentDone.MSG).l,a0
 	jsr	(printTextInMenuStrip).l
 	bra.w	E_NextCharacter
 
 
 ; block tabulate
 E_Tabulate:	cmp.l	#-1,a6
-		beq.b	CC52
+		beq.w	CC52
 		cmp.l	a2,a6
-		bge.b	CC52
+		bge.w	CC52
 		move.l	a2,(HelpBufPtrTop-DT,a4)
 		move.l	a6,(HelpBufPtrBot-DT,a4)
 		move.l	(FirstLinePtr-DT,a4),a6
 		bsr.w	E_Move2BegLine
-CBECTab:	bsr.w	C14CC
+CBECTab:	bsr.w	E_MoveBack2PrevLineBOL
 		cmp.l	(HelpBufPtrBot-DT,a4),a2
 		bgt.b	CBECTab
 		bsr.w	E_Move2BegLine
@@ -1447,7 +1465,7 @@ DoTab:		moveq	#9,d0
 		bge.b	CC0ATab
 		addq.l	#1,a6
 CC0ATab:
-NoTab:		bsr.w	C14EC
+NoTab:		bsr.w	E_Move2EOL
 		cmp.b	#$1A,(a3)
 		beq.b	CC46Tab
 		bsr.w	E_Move2BegLine
@@ -1459,11 +1477,11 @@ CC1ETab:	move.l	a2,(FirstLinePtr-DT,a4)
 		move.l	(FirstLineNr-DT,a4),-(a7)
 		lea	(a6),a2
 		move.l	(LineFromTop-DT,a4),d1
-		bsr.w	MoveupNLines
+		bsr.w	MoveUpNLines
 		move.l	(a7)+,(FirstLineNr-DT,a4)
 		move.l	(a7)+,(LineFromTop-DT,a4)
 		move.l	(a7)+,a2
-		bra.w	E_RemoveCutMarking
+		bra.w	E_RemoveMark
 CC46Tab:	bsr.w	E_Move2BegLine
 		cmp.b	#9,(a3)			; tab ?
 		beq.b	DoTabE
@@ -1492,25 +1510,29 @@ DoTabE:		moveq	#9,d0
 		bsr.w	EDITOR_INSERTCHAR_SETNS
 NoDoTabE:	bra.b	CC1ETab
 
-; select all
-E_SelectAll:	bsr.w	E_GotoTop
-		bsr.w	E_Mark_blok
-		bra.w	E_GotoBottom
+CC52:		rts
+
+
+E_SelectAll:
+	bsr.w	E_GotoTop
+	bsr.w	E_SetMark
+	bra.w	E_GotoBottom
 
 ; ----
 E_SyntCols_prefs:
-	move.b  #2,(Prefs_tiepe-DT,a4)
-	bra.b    E_XPrefs
+	move.b  #2,(PrefsType-DT,a4)
+	bra.b    E_ShowPrefsWindow
 
 ; ----
 E_Assembler_prefs:
-	move.b	#1,(Prefs_tiepe-DT,a4)
-	bra.b	E_XPrefs
+	move.b	#1,(PrefsType-DT,a4)
+	bra.b	E_ShowPrefsWindow
 
 ; ----
 E_Environment_prefs:
-	move.b	#0,(Prefs_tiepe-DT,a4)
-E_XPrefs:
+	move.b	#0,(PrefsType-DT,a4)
+
+E_ShowPrefsWindow:	; Prefs window to show stored in (PrefsType-DT,a4)
 	movem.l	d0-a6,-(sp)
 	jsr	(Handle_prefs_windows).l
 	movem.l	(sp)+,d0-a6
@@ -1519,111 +1541,101 @@ E_XPrefs:
 	move	(AantalRegels_Editor-DT,a4),d0
 	jsr	(OPED_SETNBOFFLINES).l
 	jsr	(PrintStatusBalk).l
-	bra.w	RegTab_SETALLNOTUPD
+	bra.w	LineTab_SETALLNOTUPD
 
 ; ----
 E_ExitEditor:
 	jsr	(KEY_RETURN_LAST_KEY).l
-	bra.w	EDITOR_ESCPRESSED
+	bra.w	E_EscPressed
 
 LabelFlagetjeofzo:
 	dc.w	0
 
-E_Grab_word:
+E_Grab_word:	; TODO: use WordOperation?
 	move	#0,(LabelFlagetjeofzo).l
 	move.l	a3,a1
-	bsr.b	.checkit
-	beq.b	.goright
+	bsr.b	.check
+	beq.b	.right
 	move.l	a2,a1
-.lopje:
-	subq.w	#1,a1
-	bsr.b	.checkit
-	bne.b	.lopje
+
+.loop:	subq.w	#1,a1
+	bsr.b	.check
+	bne.b	.loop
 	addq.w	#1,a1
 	bra.b	.trans
 
-.goright:
-	addq.w	#1,a1
-	move.b	(a1),d0
+.right:	addq.w	#1,a1
+	move.b	(a1),d0			; EOL
 	beq.b	.exit
-	cmp.b	#$1A,d0
+	cmp.b	#$1A,d0			; EOF
 	beq.b	.exit
-	bsr.b	.checkit
-	beq.b	.goright
-.trans:
-	lea	(CurrentAsmLine-DT,a4),a0
-.lopje2:
-	cmp.l	a2,a1
-	bne.b	.okay
+	bsr.b	.check
+	beq.b	.right
+.trans:	lea	(CurrentAsmLine-DT,a4),a0
+
+.loop2:	cmp.l	a2,a1
+	bne.b	.ok
 	move.l	a3,a1
-.okay:
-	bsr.b	.checkit
-	beq.b	.klaar
+.ok:	bsr.b	.check
+	beq.b	.done
 	move.b	(a1)+,(a0)+
-	bra.b	.lopje2
+	bra.b	.loop2
 
-.klaar:
-	clr.b	(a0)+
-	jmp	(INPUT_FILLINDAIRY).l
+.done:	clr.b	(a0)+
+	jmp	(INPUT_FILLINDIARY).l
 
-.checkit:
-	moveq	#0,d0
+.check:	moveq	#0,d0
 	move.b	(a1),d0
 	cmp.b	#".",d0
-	beq.b	.okay2
+	beq.b	.ok2
 	cmp.b	#"$",d0
-	beq.b	.okay1
+	beq.b	.ok1
 	cmp.b	#"_",d0
-	beq.b	.okay2
+	beq.b	.ok2
 	cmp.b	#"0",d0
-	bcs.b	.foutje
+	bcs.b	.found
 	cmp.b	#"9",d0
-	bls.b	.okay2
+	bls.b	.ok2
 	cmp.b	#"A",d0
-	bcs.b	.foutje
+	bcs.b	.found
 	cmp.b	#"Z",d0
-	bls.b	.okay2
+	bls.b	.ok2
 	cmp.b	#"a",d0
-	bcs.b	.foutje
+	bcs.b	.found
 	cmp.b	#"z",d0
-	bls.b	.okay2
-.foutje:
-	moveq	#0,d0
-.exit:
-	rts
+	bls.b	.ok2
+.found:	moveq	#0,d0
 
-.okay1:
-	tst	(LabelFlagetjeofzo).l
-	beq.b	.foutje
-.okay2:
-	moveq	#-1,d0
+.exit:	rts
+
+.ok1:	tst	(LabelFlagetjeofzo).l
+	beq.b	.found
+.ok2:	moveq	#-1,d0
 	rts
 
 ; ----
 E_CreateMacro:
 	bchg	#SB2_MAKEMACRO,(SomeBits2-DT,a4)
-	bne.b	.CD94
+	bne.b	.no
 	clr	(EDMACRO_BUFPTR-DT,a4)
 	lea	(Createmacro.MSG).l,a0
 	jmp	(printTextInMenuStrip).l
 
-.CD94:
-	subq.b	#2,(EDMACRO_BUFByte-DT,a4)
+.no:	subq.b	#2,(EDMACRO_BUFByte-DT,a4)
 	rts
 
 EDITOR_PUTMACRO:
 	btst	#SB2_MAKEMACRO,(SomeBits2-DT,a4)
-	beq.b	.CDB2
+	beq.b	.exit
 	lea	(EDMACRO_BUFFER-DT,a4),a1
 	add	(EDMACRO_BUFPTR-DT,a4),a1
 	move.b	d0,(a1)+
 	addq.b	#1,(EDMACRO_BUFByte-DT,a4)
-	beq.b	.CDB4
-.CDB2:
-	rts
+	beq.b	.skip
 
-.CDB4:
-	bclr	#SB2_MAKEMACRO,(SomeBits2-DT,a4)
+.exit:	rts
+
+.skip:	bclr	#SB2_MAKEMACRO,(SomeBits2-DT,a4)
 	subq.b	#1,(EDMACRO_BUFByte-DT,a4)
 	lea	(Macrobufferfu.MSG).l,a0
 	jmp	(printTextInMenuStrip).l
@@ -1631,23 +1643,22 @@ EDITOR_PUTMACRO:
 ; ----
 E_DoMacro:
 	bclr	#SB2_MAKEMACRO,(SomeBits2-DT,a4)
-	beq.b	.CDD6
+	beq.b	.skip
 	subq.b	#2,(EDMACRO_BUFByte-DT,a4)
-.CDD6:
-	lea	(EDMACRO_BUFFER-DT,a4),a1
+.skip:	lea	(EDMACRO_BUFFER-DT,a4),a1
 	move	(EDMACRO_BUFPTR-DT,a4),d1
-	beq.b	.CDF6
+	beq.b	.end
 	add	d1,a1
-.CDE2:
-	move.b	-(a1),d0
+
+.loop:	move.b	-(a1),d0
 	lea	(OwnKeyBuffer-DT,a4),a0
 	subq.b	#1,(KeyboardInBufByte-DT,a4)
 	add	(KeyboardInBuf-DT,a4),a0
 	move.b	d0,(a0)
 	subq.w	#1,d1
-	bne.b	.CDE2
-.CDF6:
-	rts
+	bne.b	.loop
+
+.end:	rts
 
 ; ----
 E_Jump2Error:
@@ -1657,7 +1668,7 @@ E_Jump2Error:
 	lea	(AsmErrorTable-DT,a4),a0
 
 .loop:	cmp.l	#$FFFFFFFF,(a0)
-	beq.b	.nomore
+	beq.b	.end
 	cmp.l	(a0),d0			; error linenr
 	blt.b	.found
 	addq.w	#8,a0
@@ -1674,8 +1685,7 @@ E_Jump2Error:
 	movem.l	(sp)+,a0/a1/a5/a6
 	rts
 
-.nomore:
-	lea	(Nomoreerrorsf.MSG).l,a0
+.end:	lea	(Nomoreerrorsf.MSG).l,a0
 	jsr	(printTextInMenuStrip).l
 	movem.l	(sp)+,a0/a1/a5/a6
 	rts
@@ -1684,9 +1694,9 @@ E_Jump2Error:
 E_Jump2Line:
 	movem.l	a0/a5/a6,-(sp)
 	btst	#0,(PR_ReqLib).l
-	beq.b	.noreqt
+	beq.b	.noreq
 	btst	#0,(PR_ExtReq).l
-	beq.b	.noreqt
+	beq.b	.noreq
 	movem.l	a0-a6,-(sp)
 	lea	JumpLineNr,a1
 	lea	Jumptowhichli.MSG,a2
@@ -1696,20 +1706,13 @@ E_Jump2Line:
 	jsr	(_LVOrtGetLongA,a6)
 	movem.l	(sp)+,a0-a6
 	move.l	JumpLineNr,d0
-	bra.b	.CEA2
+	bra.b	.jump
 
-.noreqt:
-	lea	(Jumptoline.MSG).l,a0
+.noreq:	lea	(Jumptoline.MSG).l,a0
 	jsr	(GetNrFromTitle).l
-	beq.b	.novalue
-.CEA2:
-;	swap	d0
-;	tst	d0
-;	sne	d1
-;	ext.w	d1	;$ffff
-;	swap	d0
-;	or.w	d1,d0
-	move.l	d0,-(sp)
+	beq.b	.end
+
+.jump:	move.l	d0,-(sp)
 	lea	(Jumping.MSG).l,a0
 	jsr	(printTextInMenuStrip).l
 	move.l	(sp)+,d0
@@ -1720,8 +1723,7 @@ E_Jump2Line:
 	movem.l	(sp)+,a0/a5/a6
 	rts
 
-.novalue:
-	jsr	(RESETMENUTEXT).l
+.end:	jsr	(RESETMENUTEXT).l
 	movem.l	(sp)+,a0/a5/a6
 	rts
 
@@ -1816,26 +1818,26 @@ E_JumpToA1:	; a1 = position to jump to
 	move.l	(FirstLineNr-DT,a4),d4
 	add.l	(LineFromTop-DT,a4),d4	; d4 = current line number
 	clr.l	(LineFromTop-DT,a4)
-.checkeof:
-	move.l	(sourceend-DT,a4),a0
+
+.eof:	move.l	(SourceEnd-DT,a4),a0
 	sub.l	a3,a0
 	add.l	a2,a0
 	cmp.l	a0,a1
-	bls.b	.checkbof
+	bls.b	.bof
 	move.l	a0,a1			; mark is after EOF
-.checkbof:
-	move.l	(sourcestart-DT,a4),a0
+
+.bof:	move.l	(SourceStart-DT,a4),a0
 	cmp.l	a0,a1
 	bcc.b	.jump
 	move.l	a0,a1			; mark is before BOF
-.jump:
-	lea	(Jumping.MSG).l,a0
+
+.jump:	lea	(Jumping.MSG).l,a0
 	jsr	(printTextInMenuStrip).l
 	cmp.l	a2,a1
 	bhi.b	.before_mark		; cursor is before mark
 	bcs.b	.after_mark		; cursor is after mark
-.done:
-	move.l	d4,(FirstLineNr-DT,a4)
+
+.done:	move.l	d4,(FirstLineNr-DT,a4)
 	move.l	a2,(FirstLinePtr-DT,a4)
 	lea	(Done.MSG).l,a0
 	jsr	(druk_menu_txt_verder).l
@@ -1897,13 +1899,13 @@ E_Jump1WordBack:
 E_Move2BegLine:
 	move.w	#0,(Oldcursorcol-DT,a4)
 	move.b	(-1,a2),d0
-	beq.b	.done
+	beq.b	.done			; EOL
 	cmp.b	#$19,d0
-	beq.b	.done
+	beq.b	.done			; BOF
 	bsr.w	E_PrevCharacter
 	bra.b	E_Move2BegLine
 
-.done:	bsr.w	RegTab_SETALLNOTUPD
+.done:	bsr.w	LineTab_SETALLNOTUPD
 	clr	(YposScreen-DT,a4)
 	rts
 
@@ -1911,9 +1913,9 @@ E_Move2BegLine:
 E_Move2EndLine:
 	move.w	#-1,(Oldcursorcol-DT,a4)
 	move.b	(a3),d0
-	beq.b	.done
+	beq.b	.done			; EOL
 	cmp.b	#$1A,d0
-	beq.b	.done
+	beq.b	.done			; EOF
 	bsr.w	E_NextCharacter
  	bra.b	E_Move2EndLine
 
@@ -1925,56 +1927,54 @@ E_PageUp:
 	moveq.l	#0,d1
 	move	(NrOfLinesInEditor-DT,a4),d1
 	subq.w	#1,d1
-C10AA:
-	bsr.w	MoveupNLines
+E_PageUpNLines:
+	bsr.w	MoveUpNLines
 	bsr.b	C110E
 C10B0:
 	cmp.l	#1,(FirstLineNr-DT,a4)
 	bne.b	C10D8
 	clr.l	(LineFromTop-DT,a4)
 	tst.b	(PR_Keepxy).l
-	beq.b	C10D6
+	beq.b	.end
 	move	(Oldcursorcol-DT,a4),(NewCursorpos-DT,a4)
 	move	(YposScreen-DT,a4),d0
 	add	d0,(NewCursorpos-DT,a4)
-	bra.w	C14CC
+	bra.w	E_MoveBack2PrevLineBOL
 
-C10D6:
-	rts
+.end:	rts
+
 
 C10D8:
 	move.b	(a3)+,d0
-	cmp.b	#$1A,d0
-	beq.b	C1106
+	cmp.b	#$1A,d0			; EOF
+	beq.b	.eof
 	move.b	d0,(a2)+
 	bne.b	C10D8
 	move.l	#1,(LineFromTop-DT,a4)
 	tst.b	(PR_Keepxy).l
-	beq.b	C1104
+	beq.b	.end
 	move	(Oldcursorcol-DT,a4),(NewCursorpos-DT,a4)
 	move	(YposScreen-DT,a4),d0
 	add	d0,(NewCursorpos-DT,a4)
-	bra.w	C14CC
+	bra.w	E_MoveBack2PrevLineBOL
 
-C1104:
-	rts
+.end:	rts
 
-C1106:
-	clr.l	(LineFromTop-DT,a4)
+.eof:	clr.l	(LineFromTop-DT,a4)
 	subq.w	#1,a3
 	rts
 
 C110E:
 	move.l	(FirstLinePtr-DT,a4),a0
 	cmp.l	a2,a3
-	beq.b	C1140
-	cmp.l	a2,a0
-	beq.b	C113E
+	beq.b	.C1140
+	cmp.l	a2,a0			; we're on the first line of the screen
+	beq.b	.end
 	move.l	a2,d1
-	sub.l	a0,d1
-	bra.b	C1130
+	sub.l	a0,d1			; d1 = num lines from first
+	bra.b	.check
 
-C1120:
+.back8:	move.b	-(a2),-(a3)
 	move.b	-(a2),-(a3)
 	move.b	-(a2),-(a3)
 	move.b	-(a2),-(a3)
@@ -1982,19 +1982,18 @@ C1120:
 	move.b	-(a2),-(a3)
 	move.b	-(a2),-(a3)
 	move.b	-(a2),-(a3)
-	move.b	-(a2),-(a3)
-C1130:
-	subq.l	#8,d1
-	bpl.b	C1120
+
+.check:	subq.l	#8,d1
+	bpl.b	.back8			; more than 8
 	addq.w	#7,d1
-	bmi.b	C113E
-C1138:
-	move.b	-(a2),-(a3)
-	dbra	d1,C1138
-C113E:
-	rts
+	bmi.b	.end			; less than 8
 
-C1140:
+.backN:	move.b	-(a2),-(a3)
+	dbra	d1,.backN
+
+.end:	rts
+
+.C1140:
 	move.l	a0,a2
 	move.l	a0,a3
 	rts
@@ -2002,16 +2001,16 @@ C1140:
 C1146:
 	move.l	(FirstLinePtr-DT,a4),a0
 	cmp.l	a2,a3
-	beq.b	C1180
+	beq.b	.C1180
 	cmp.l	a0,a2
 	bcc.b	C110E
 	cmp.l	a3,a0
-	beq.b	C117A
+	beq.b	.end
 	move.l	a0,d1
 	sub.l	a3,d1
-	bra.b	C116C
+	bra.b	.check
 
-C115C:
+.fwd8:	move.b	(a3)+,(a2)+
 	move.b	(a3)+,(a2)+
 	move.b	(a3)+,(a2)+
 	move.b	(a3)+,(a2)+
@@ -2019,21 +2018,19 @@ C115C:
 	move.b	(a3)+,(a2)+
 	move.b	(a3)+,(a2)+
 	move.b	(a3)+,(a2)+
-	move.b	(a3)+,(a2)+
-C116C:
-	subq.l	#8,d1
-	bpl.b	C115C
+
+.check:	subq.l	#8,d1
+	bpl.b	.fwd8
 	addq.w	#7,d1
-	bmi.b	C117A
-C1174:
-	move.b	(a3)+,(a2)+
-	dbra	d1,C1174
-C117A:
-	move.l	a2,(FirstLinePtr-DT,a4)
+	bmi.b	.end
+
+.fwdN:	move.b	(a3)+,(a2)+
+	dbra	d1,.fwdN
+
+.end:	move.l	a2,(FirstLinePtr-DT,a4)
 	rts
 
-C1180:
-	move.l	a0,a2
+.C1180:	move.l	a0,a2
 	move.l	a0,a3
 	rts
 
@@ -2057,28 +2054,25 @@ E_PageDown:
 	move.l	(sp)+,d1
 	clr.l	(LineFromTop-DT,a4)
 	subq.w	#1,d1
-C11AE:
-	move.b	(a3)+,d0
+
+.loop:	move.b	(a3)+,d0
 	cmp.b	#$1A,d0
-	beq.b	C11DE
+	beq.b	.eof
 	move.b	d0,(a2)+
-	bne.b	C11AE
+	bne.b	.loop
 	addq.l	#1,(LineFromTop-DT,a4)
-	dbra	d1,C11AE
+	dbra	d1,.loop
 
 	tst.b	(PR_Keepxy).l
-	beq.b	C11DC
+	beq.b	.noxy
 	move	(Oldcursorcol-DT,a4),(NewCursorpos-DT,a4)
 	move	(YposScreen-DT,a4),d0
 	add	d0,(NewCursorpos-DT,a4)
-	bra.w	C14CC
+	bra.w	E_MoveBack2PrevLineBOL
 
-C11DC:
-	rts
+.noxy:	rts
 
-C11DE:
-	subq.w	#1,a3
-C11E0:
+.eof:	subq.w	#1,a3
 	rts
 
 EDITOR_ReturnPressed:
@@ -2089,17 +2083,18 @@ EDITOR_ReturnPressed:
 	move.l	(sp)+,a0
 	btst	#0,(PR_AutoIndent).l
 	beq.b	.exit
+
 .C11F6:					; here be autoindenting stuff
 	move.b	-(a0),d0
-	beq.b	.C1200
-	cmp.b	#$19,d0
+	beq.b	.C1200			; EOL
+	cmp.b	#$19,d0			; BOF
 	bne.b	.C11F6
 .C1200:
 	addq.w	#1,a0
 	move.l	a0,a1
 .C1204:
 	move.b	(a0)+,d0
-	cmp.b	#9,d0
+	cmp.b	#9,d0			; TAB
 	beq.b	.C1204
 	cmp.b	#" ",d0
 	beq.b	.C1204
@@ -2107,7 +2102,7 @@ EDITOR_ReturnPressed:
 	cmp.l	a0,a1
 	beq.b	.exit
 	tst.b	d0
-	beq.b	C122E
+	beq.b	.C122E
 .C121C:
 	move.b	(a1)+,d0
 	movem.l	a0/a1,-(sp)
@@ -2118,20 +2113,19 @@ EDITOR_ReturnPressed:
 
 .exit:	rts
 
-C122E:
-	bsr.w	E_PrevCharacter
-	bsr.w	E_Delete2bol
+.C122E:	bsr.w	E_PrevCharacter
+	bsr.w	E_Delete2BOL
 	bra.w	E_NextCharacter
 
 EDITOR_INSERTCHAR_SETNS:
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
-	clr.w	(AssmblrStatus).l			; ***
-	move.w	#-1,(Oldcursorcol-DT,a4)		; ***
+	clr.w	(AssmblrStatus).l
+	move.w	#-1,(Oldcursorcol-DT,a4)
 C124C:
 	moveq	#1,d1
 	bsr.w	MOVEMARKS
 C1252:
-	bsr.w	C13F8
+	bsr.w	E_ExtendCutBufferBy250
 	move.b	d0,(a2)+
 	rts
 
@@ -2147,28 +2141,28 @@ C126E:
 	moveq	#1,d1
 	bsr.w	MOVEMARKS
 C1274:
-	bsr.w	C13F8
+	bsr.w	E_ExtendCutBufferBy250
 	move.b	d0,-(a3)
 	rts
 
-EDITOR_Backspace:
+E_Backspace:
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 	moveq	#-1,d1
 	bsr.w	MOVEMARKS
 	move.w	#-1,(Oldcursorcol-DT,a4)
-	move.b	-(a2),d0
-	beq.w	C154A
-	cmp.b	#$19,d0
+	move.b	-(a2),d0		; EOL
+	beq.w	E_Scroll1LineUpInternal
+	cmp.b	#$19,d0			; BOF
 	beq.b	C124C
 	rts
 
-Delete:
+E_Delete:
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 	moveq	#-1,d1
 	bsr.w	MOVEMARKS
 	move.w	#-1,(Oldcursorcol-DT,a4)
 	move.b	(a3)+,d0
-	cmp.b	#$1A,d0
+	cmp.b	#$1A,d0			; EOF
 	beq.b	C126E
 	rts
 
@@ -2220,18 +2214,7 @@ C131A:
 	beq.b	C1358
 	cmp.b	#9,d1
 	bne.b	C1344
-	move.l	d0,-(sp)
-	moveq	#-1,d0
-	bsr.b	C135A
-	tst.b	(B30047-DT,a4)
-	beq.b	C133E
-	move	d0,d2
-	move.l	(sp)+,d0
-	bra.b	C1344
-
-C133E:
 	or.w	#7,d2
-	move.l	(sp)+,d0
 C1344:
 	cmp	d0,d2
 	bge.b	C1358
@@ -2244,59 +2227,12 @@ C1344:
 C1358:
 	rts
 
-C135A:
-	movem.l	d1/a0,-(sp)
-	move	d0,d1
-	st	(B30047-DT,a4)
-	lea	(L2EBC2-DT,a4),a0
-C1368:
-	move	(a0)+,d0
-	beq.b	C1378
-	add	d1,d0
-	cmp	d2,d0
-	bmi.b	C1368
-	movem.l	(sp)+,d1/a0
-	rts
-
-C1378:
-	sf	(B30047-DT,a4)
-	movem.l	(sp)+,d1/a0
-	rts
-
-C1382:
-	movem.l	d0/a0/a1,-(sp)
-	lea	(L2EBC2-DT,a4),a1
-	move.l	(sourcestart-DT,a4),a0
-	cmp.l	#0,a0
-	beq.b	.end
-	cmp.b	#";",(a0)+	;';'
-	bne.b	.end
-	moveq	#0,d0
-
-.loop:	addq.w	#1,d0
-	tst.b	(a0)
-	beq.b	.end
-	cmp.b	#"-",(a0)+	;'-'
-	beq.b	.loop
-	cmp.b	#" ",(-1,a0)	;' '
-	beq.b	.loop
-	cmp.b	#"T",(-1,a0)	;'T'
-	bne.b	.end
-	sf	(B30047-DT,a4)
-	move	d0,(a1)+
-	cmp.l	#L2EC10,a1
-	bne.b	.loop
-
-.end:	clr	(a1)
-	movem.l	(sp)+,d0/a0/a1
-	rts
-
 ; ----
 E_ArrowRight:
 	move.w	#-1,(Oldcursorcol-DT,a4)
 E_NextCharacter:
 	move.b	(a3)+,d0
-	cmp.b	#$1A,d0
+	cmp.b	#$1A,d0			; EOF
 	beq.w	C1274
 	bra.w	C1252
 
@@ -2305,35 +2241,60 @@ E_ArrowLeft:
 	move.w	#-1,(Oldcursorcol-DT,a4)
 E_PrevCharacter:
 	move.b	-(a2),d0
-	cmp.b	#$19,d0
+	cmp.b	#$19,d0			; BOF
 	beq.w	C1252
 	bra.w	C1274
 
-C13F8:
+E_ExtendCutBufferBy250:
 	cmp.l	a3,a2
-	beq.b	C13FE
+	beq.b	.skip
 	rts
 
-C13FE:
-	move.l	#$000000FA,a1
-EDITOR_MAKEHOLE_A1LONG:
+.skip:	move.l	#$FA,a1
+
+E_ExtendCutBuffer:	; a1 = size to extend
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 	clr	(AssmblrStatus).l
-	move.l	(Cut_Blok_End-DT,a4),a0
+	move.l	(Cut_Buffer_End-DT,a4),a0
 	move.l	a1,d1
 	add.l	a0,a1
 	cmp.l	(WORK_END-DT,a4),a1
-	bge.b	C142C
-	add.l	d1,(sourceend-DT,a4)
-	move.l	a1,(Cut_Blok_End-DT,a4)
-	move.b	#$1A,(a1)
+	bge.b	.nomem
+	add.l	d1,(SourceEnd-DT,a4)
+	move.l	a1,(Cut_Buffer_End-DT,a4)
+	move.b	#$1A,(a1)		; EOF
 	bra.b	C14A4
 
-C142C:
-	bsr.w	MakeReady2Exit
+.nomem:	bsr.w	MakeReady2Exit
 	jsr	(RESETMENUTEXT2).l
 	bsr.w	C164C
 	bra.w	_ERROR_WorkspaceMemoryFull
+
+C14A4:				; a1 = new cut buffer end
+	move.l	a0,d1		; a0 = old cut buffer end
+	sub.l	a3,d1		; a3 = old position in cut buffer?
+	bra.b	.check
+
+.back8:	move.b	-(a0),-(a1)
+	move.b	-(a0),-(a1)
+	move.b	-(a0),-(a1)
+	move.b	-(a0),-(a1)
+	move.b	-(a0),-(a1)
+	move.b	-(a0),-(a1)
+	move.b	-(a0),-(a1)
+	move.b	-(a0),-(a1)
+
+.check:	subq.l	#8,d1
+	bpl.b	.back8
+	addq.w	#7,d1
+	bmi.b	.end
+
+.rest:	move.b	-(a0),-(a1)
+	dbra	d1,.rest
+
+.end:	move.l	a1,a3
+	rts
+
 
 MOVEMARKS:
 	cmp.l	(Mark1set-DT,a4),a2
@@ -2368,154 +2329,116 @@ MOVEMARKS:
 	add.l	d1,(Mark10set-DT,a4)
 .end:	rts
 
-C14A4:
-	move.l	a0,d1
-	sub.l	a3,d1
-	bra.b	C14BA
 
-C14AA:
-	move.b	-(a0),-(a1)
-	move.b	-(a0),-(a1)
-	move.b	-(a0),-(a1)
-	move.b	-(a0),-(a1)
-	move.b	-(a0),-(a1)
-	move.b	-(a0),-(a1)
-	move.b	-(a0),-(a1)
-	move.b	-(a0),-(a1)
-C14BA:
-	subq.l	#8,d1
-	bpl.b	C14AA
-	addq.w	#7,d1
-	bmi.b	C14C8
-C14C2:
-	move.b	-(a0),-(a1)
-	dbra	d1,C14C2
-C14C8:
-	move.l	a1,a3
-	rts
-
-C14CC:
-	bsr.b	C14D6
+E_MoveBack2PrevLineBOL:
+	bsr.b	E_Move2BOL
 	bsr.w	E_PrevCharacter
-	bsr.b	C14D6
+	bsr.b	E_Move2BOL
 	bra.b	C14FA
 
-C14D6:
-	tst.b	(-1,a2)
-	beq.b	C14EA
-	cmp.b	#$19,(-1,a2)
-	beq.b	C14EA
+E_Move2BOL:
+	tst.b	(-1,a2)			; check for BOL
+	beq.b	.end
+	cmp.b	#$19,(-1,a2)		; check for BOF
+	beq.b	.end
 	bsr.w	E_PrevCharacter
-	bra.b	C14D6
+	bra.b	E_Move2BOL
+.end:	rts
 
-C14EA:
-	rts
 
-C14EC:
-	cmp.b	#$1A,(a3)
+E_Move2EOL:
+	cmp.b	#$1A,(a3)		; check for EOF
 	beq.b	C14FA
 	bsr.w	E_NextCharacter
-	tst.b	d0			; *** Loop to the end of the line
-	bne.b	C14EC
-C14FA:
+	tst.b	d0			; check for EOL
+	bne.b	E_Move2EOL
+
+C14FA:	; move to next tabstop?
 	move	(NewCursorpos-DT,a4),d3
 	clr	d2
-	bra.b	C1532
+	bra.b	.check
 
-C1502:
-	tst.b	(a3)
-	beq.b	C1536
-	cmp.b	#$1A,(a3)
-	beq.b	C1536
+.loop:	tst.b	(a3)			; EOL
+	beq.b	.end
+	cmp.b	#$1A,(a3)		; EOF
+	beq.b	.end
 	bsr.w	E_NextCharacter
-	cmp.b	#9,d0
-	bne.b	C1530
-	move.l	d0,-(sp)
-	moveq	#-1,d0
-	bsr.w	C135A
-	tst.b	(B30047-DT,a4)
-	beq.b	C152A
-	move	d0,d2
-	move.l	(sp)+,d0
-	bra.b	C1530
-
-C152A:
+	cmp.b	#9,d0			; TAB
+	bne.b	.skip
 	or.w	#7,d2
-	move.l	(sp)+,d0
-C1530:
-	addq.w	#1,d2
-C1532:
-	cmp	d2,d3
-	bhi.b	C1502
-C1536:
-	rts
+.skip:	addq.w	#1,d2
+
+.check:	cmp	d2,d3
+	bhi.b	.loop
+
+.end:	rts
 
 ; ----
 E_Scroll1LineUp:	;editor scroll down
 	tst.b	(PR_Keepxy).l
-	beq.b	C1546
+	beq.b	.noxy
 	move	(Oldcursorcol-DT,a4),(NewCursorpos-DT,a4)
-C1546:
-	bsr.b	C14CC
-C154A:
+.noxy:	bsr.b	E_MoveBack2PrevLineBOL
+
+E_Scroll1LineUpInternal:
 	bsr.w	C16D8
 	cmp.b	#$19,(-1,a2)
-	beq.b	C158C
+	beq.b	.end
 	cmp.l	#1,(FirstLineNr).l
-	beq.b	C158C
+	beq.b	.end
 	cmp.l	#1,(LineFromTop-DT,a4)
-	bne.b	C158C
+	bne.b	.end
 	bsr.w	Show_Cursor
 	bset	#SB3_COMMANDMODE,(SomeBits3-DT,a4)	;in commandmode
 	jsr	(ScrollEditorDown).l
 	bsr.w	GoBack1Line
-	bsr.b	Regeltab_scrolldown
+	bsr.b	LineTab_scrolldown
 	move	#$00FF,(SCROLLOKFLAG-DT,a4)
 	jsr	(new2old_stuff).l
-C158C:
-	rts
+
+.end:	rts
 
 ; ----
 E_ScrollDown1Line:	; editor scroll up
 	tst.b	(PR_Keepxy).l
-	beq.b	C159C
+	beq.b	.noxy
 	move	(Oldcursorcol-DT,a4),(NewCursorpos-DT,a4)
-C159C:
-	bsr.w	C14EC
+
+.noxy:	bsr.w	E_Move2EOL
 	cmp.b	#$1A,(a3)
-	beq.b	C15D4
+	beq.b	.end
 	moveq	#0,d0
 	move	(NrOfLinesInEditor-DT,a4),d0
 	subq.w	#3,d0
 	cmp.l	(LineFromTop-DT,a4),d0
-	bcc.b	C15D4
+	bcc.b	.end
 	bsr.w	Show_Cursor
 	bset	#SB3_COMMANDMODE,(SomeBits3-DT,a4)	;in commandmode
 	jsr	(ScrollEditorUp).l
 	bsr.w	BeginNextLine
-	bsr.b	Regeltab_scrollup
+	bsr.b	LineTab_scrollup
 	move	#$00FF,(SCROLLOKFLAG-DT,a4)
 	jsr	(new2old_stuff).l
-C15D4:
-	rts
 
-;** regel tabel bijwerken **
+.end:	rts
 
-Regeltab_scrollup:
-	lea	(RegelPtrsIn-DT,a4),a0
+;** update line table
+
+LineTab_scrollup:
+	lea	(LinePtrsIn-DT,a4),a0
 	move	(NrOfLinesInEditor-DT,a4),d0
 	subq.w	#2,d0
 
 	move.l	a0,a1
 	addq.l	#4,a1
-.lopje:
-	move.l	(a1)+,(a0)+
-	dbra	d0,.lopje
+
+.loop:	move.l	(a1)+,(a0)+
+	dbra	d0,.loop
 	move.l	#-1,(a0)
 	rts
 
-Regeltab_scrolldown:
-	lea	(RegelPtrsIn-DT,a4),a0
+LineTab_scrolldown:
+	lea	(LinePtrsIn-DT,a4),a0
 	move	(NrOfLinesInEditor-DT,a4),d0
 	subq.w	#2,d0
 
@@ -2528,22 +2451,17 @@ Regeltab_scrolldown:
 	add	d1,a0
 	add	d1,a1
 
-;	ENDC
-.lopje:
-	move.l	-(a0),-(a1)
-	dbra	d0,.lopje
+.loop:	move.l	-(a0),-(a1)
+	dbra	d0,.loop
 	move.l	#-1,(a0)
 	rts
 
-;**
-
-EDITOR_ESCPRESSED:
+E_EscPressed:
 	bsr.b	MakeReady2Exit
 	jsr	(RESETMENUTEXT2).l
 	bsr.b	C164C
 
 	jsr	scroll_up_cmd_fix
-
 	jmp	(CommandlineInputHandler).l
 
 MakeReady2Exit:
@@ -2552,44 +2470,44 @@ MakeReady2Exit:
 C1634:
 	move.l	(FirstLinePtr-DT,a4),a0
 	move.l	(LineFromTop-DT,a4),d0
-	jsr	(C144E4).l
+	jsr	(DownNMinus1Lines).l
 	move.l	a0,(FirstLinePtr-DT,a4)
-	move.l	(Cut_Blok_End-DT,a4),a0
+	move.l	(Cut_Buffer_End-DT,a4),a0
 	bra.b	cut_block
 
 C164C:
-	move.l	(sourceend-DT,a4),a0
+	move.l	(SourceEnd-DT,a4),a0	; cut buffer start
 	tst.b	(-1,a0)
-	beq.b	C167C
-	move.l	(Cut_Blok_End-DT,a4),a1
+	beq.b	.end
+	move.l	(Cut_Buffer_End-DT,a4),a1
 	move.l	a1,a2
 	addq.w	#1,a2
 	move.l	a1,d0
 	sub.l	a0,d0
 	subq.l	#1,d0
-C1664:
-	move.b	-(a1),-(a2)
-	dbra	d0,C1664
+
+.loop:	move.b	-(a1),-(a2)
+	dbra	d0,.loop
 	swap	d0
 	subq.w	#1,d0
 	swap	d0
-	bpl.b	C1664
+	bpl.b	.loop
 	clr.b	(a0)
-	addq.l	#1,(Cut_Blok_End-DT,a4)
-	addq.l	#1,(sourceend-DT,a4)
-C167C:
-	rts
+	addq.l	#1,(Cut_Buffer_End-DT,a4)
+	addq.l	#1,(SourceEnd-DT,a4)
+
+.end:	rts
 
 KillCopybuffer:
-	move.l	(sourceend-DT,a4),d0
+	move.l	(SourceEnd-DT,a4),d0
 	addq.l	#1,d0
-	move.l	d0,(Cut_Blok_End-DT,a4)
+	move.l	d0,(Cut_Buffer_End-DT,a4)	; cut block start = end
 	rts
 
 ; ----
 cut_block:
-	cmp.l	a2,a3
-	beq.b	C16D0
+	cmp.l	a2,a3			; buffer ptr != mod buffer ptr??
+	beq.b	.end
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)	;source was changed
 	clr	(AssmblrStatus).l
 	move.l	a0,d1
@@ -2605,90 +2523,92 @@ cut_block:
 	move.b	(a3)+,(a2)+
 	move.b	(a3)+,(a2)+
 	move.b	(a3)+,(a2)+
+
 .copy_blok_in_source:
 	subq.l	#8,d1
 	bpl.b	.copy_8bytes
 	addq.w	#8-1,d1
-	bmi.b	C16BE
-C16B8:
-	move.b	(a3)+,(a2)+
-	dbra	d1,C16B8
-C16BE:
-	move.b	#$1A,(a2)
-	move.l	(Cut_Blok_End-DT,a4),d0
-	move.l	a2,(Cut_Blok_End-DT,a4)
+	bmi.b	.done
+
+.rest:	move.b	(a3)+,(a2)+
+	dbra	d1,.rest
+
+.done:	move.b	#$1A,(a2)		; EOF
+	move.l	(Cut_Buffer_End-DT,a4),d0
+	move.l	a2,(Cut_Buffer_End-DT,a4)
 	sub.l	a2,d0
-	sub.l	d0,(sourceend-DT,a4)
-C16D0:
-	moveq	#13,d0
+	sub.l	d0,(SourceEnd-DT,a4)
+
+.end:	moveq	#13,d0
 	jmp	(Druk_char_af2).l
 
-C16D8:
+
+C16D8:	; recenter?
 	move.l	(LineFromTop-DT,a4),d0
 	bra.b	C16E6
 
 C16DE:
 	move.l	(LineFromTop-DT,a4),d0
-	beq.b	C16E6
+	beq.b	C16E6			; we're on the first visible line
 	subq.w	#1,d0
 C16E6:
-	lea	(RegelPtrsIn-DT,a4),a0
+	lea	(LinePtrsIn-DT,a4),a0
 	asl.w	#2,d0
 	add	d0,a0
 	move.l	#-1,(a0)
 	rts
 
-RegTab_SETALLNOTUPD:
+LineTab_SETALLNOTUPD:
 	move	(NrOfLinesInEditor-DT,a4),d1
-	lea	(RegelPtrsIn-DT,a4),a0
+	lea	(LinePtrsIn-DT,a4),a0
 	moveq	#-1,d0
-.lopje:
-	move.l	d0,(a0)+
-	dbra	d1,.lopje
+
+.loop:	move.l	d0,(a0)+
+	dbra	d1,.loop
 	rts
 
 EDITSCRPRINT:
 	cmp.l	(FirstLinePtr-DT,a4),a2
-	bcs.b	C1718
+	bcs.b	.goup			; point is before first visible line
 	bsr.w	UpdateAllLines
 	tst.l	(LineFromTop-DT,a4)
-	bne.b	C1728
-C1718:
-	cmp.l	#1,(FirstLineNr-DT,a4)
-	beq.b	C1738
+	bne.b	.C1728			; point is not on first visible line
+
+.goup:	cmp.l	#1,(FirstLineNr-DT,a4)
+	beq.b	.C1738
 	moveq	#1,d1
-	bsr.w	MoveupNLines
+	bsr.w	MoveUpNLines
 	bra.b	EDITSCRPRINT
 
 ;************* REGEL IN EDITOR **********
 
-C1728:
+.C1728:
 	move.l	(LineFromTop-DT,a4),d0
 	cmp	(NrOfLinesInEditor_min1-DT,a4),d0
-	bcs.b	C1738
+	bcs.b	.C1738
 	bsr.w	BeginNextLine
 	bra.b	EDITSCRPRINT
 
-C1738:
+.C1738:
 	bsr.b	C16DE
 	tst	(SCROLLOKFLAG-DT,a4)
 	bmi.w	PrintStatusInfo
-	bne.b	C1750
-	jsr	(messages_get).l
+	bne.b	.C1750
+	jsr	(IO_GetKeyMessages).l
 	bne.w	PrintStatusInfo
-C1750:
+.C1750:
 	clr	(SCROLLOKFLAG-DT,a4)
 	movem.l	d0-d7/a0-a3/a5/a6,-(sp)
-C1764:
+.C1764:
 	move.l	(MainWindowHandle-DT,a4),a1
 	btst	#7,($001A,a1)		;menustate
-	bne.b	C1764
+	bne.b	.C1764
 	move.l	(LineFromTop-DT,a4),d4
 	move	d4,d1
 	asl.w	#2,d1		;y in regel tab
 	move.l	a6,d5
-	lea	(RegelPtrsIn-DT,a4),a6
-	lea	(RegelPtrsOut-DT,a4),a5
+	lea	(LinePtrsIn-DT,a4),a6
+	lea	(LinePtrsOut-DT,a4),a5
 	add	d1,a6
 	add	d1,a5
 	move.l	a2,d6
@@ -2702,15 +2622,15 @@ C1764:
 	swap	d1
 	move	d0,d1
 	btst	#0,(PR_LineNrs).l
-	beq.b	C17BE
+	beq.b	.C17BE
 	subq.w	#6,d1
-C17BE:
+.C17BE:
 	move.l	(a5)+,a0
 	cmp.l	(a6)+,a0
 ;	beq.s	.noprint
 	
 	cmp.b	#MT_DEBUGGER,(menu_tiepe-DT,a4)
-	beq.b	C1804
+	beq.b	.C1804
 	bclr	#SB3_COMMANDMODE,(SomeBits3-DT,a4)	;uit commandmode
 	bne.b	.C17D6
 	bsr.w	Show_Cursor
@@ -2722,31 +2642,31 @@ C17BE:
 	move	d0,(cursor_row_pos-DT,a4)
 	move	(NewCursorpos-DT,a4),d0
 	cmp	d1,d0
-	bcs.b	C17F0
+	bcs.b	.C17F0
 	move	d1,d0
 	subq.w	#1,d0
-C17F0:
+.C17F0:
 	btst	#0,(PR_LineNrs).l
 	beq.b	.C17FC
 	addq.w	#6,d0
 .C17FC:
 	move	d0,(Cursor_col_pos-DT,a4)
 	bsr.w	Show_Cursor
-C1804:
-	lea	(RegelPtrsIn-DT,a4),a6
-	lea	(RegelPtrsOut-DT,a4),a5
+.C1804:
+	lea	(LinePtrsIn-DT,a4),a6
+	lea	(LinePtrsOut-DT,a4),a5
 	moveq	#0,d4
 
 	bsr.w	get_font1
-C181A:
+.C181A:
 	move.l	(a5)+,a0
 	cmp.l	(a6)+,a0
-	beq.b	C1824
+	beq.b	.C1824
 	bsr.w	druk_wat_in_editor
-C1824:
+.C1824:
 	addq.w	#1,d4
 	cmp	(NrOfLinesInEditor-DT,a4),d4
-	bne.b	C181A
+	bne.b	.C181A
 	movem.l	(sp)+,d0-d7/a0-a3/a5/a6
 
 ;*************** STATUS LINE ****************
@@ -2755,12 +2675,11 @@ PrintStatusInfo:
 	move.l	a2,d6
 	move.l	a3,d7
 
-	;bsr.w	get_font1	;invul stuff
 	bsr.w	get_font_grey_on_black
 
 	bclr	#MB1_REGEL_NIET_IN_SOURCE,(MyBits-DT,a4)
 	
-	lea	(regel_buffer-DT,a4),a1		;status
+	lea	(line_buffer-DT,a4),a1		;status
 	lea.l	(a1),a2
 
 	addq.w	#7,a1
@@ -2784,8 +2703,8 @@ PrintStatusInfo:
 	bsr.w	TURBOPRLINENB_3DIGIT
 C1890:
 	add	#8,a1
-	move.l	(sourceend-DT,a4),d0
-	sub.l	(sourcestart-DT,a4),d0
+	move.l	(SourceEnd-DT,a4),d0
+	sub.l	(SourceStart-DT,a4),d0
 	add.l	d6,d0
 	sub.l	d7,d0
 	divu	#10000,d0
@@ -2799,11 +2718,10 @@ C1890:
 	movem.l	d1/d3-d7/a0-a6,-(sp)
 	move.l	(4).w,a6
 	move.l	#$00020002,d1
-	;move.l	(4).w,a6			; ***
 	jsr	(_LVOAvailMem,a6)
 	move.l	d0,d2
 	moveq	#0,d1
-	jsr	(_LVOAvailMem,a6)		; ***
+	jsr	(_LVOAvailMem,a6)
 	movem.l	(sp)+,d1/d3-d7/a0-a6
 	lsr.l	#8,d0
 	lsr.l	#2,d0
@@ -2851,16 +2769,16 @@ C1938:
 	lea	(TimeString).l,a0
 	move.w	Scr_br_chars,d7
 	sub.w	#10,d7
-	lea	(regel_buffer-DT,a4),a1		;status
+	lea	(line_buffer-DT,a4),a1		;status
 	lea	(a1,d7.w),a1
 
 ;	lea	(7,a1),a1
 	moveq	#8-1,d7
-.lopje:
-	moveq	#0,d0
+
+.loop:	moveq	#0,d0
 	move.b	(a0)+,d0
 	bsr.w	FASTSENDONECHAR
-	dbra	d7,.lopje
+	dbra	d7,.loop
 
 	cmp	#$FFFF,(Oldcursorcol-DT,a4)
 	bne.b	C197E
@@ -2891,39 +2809,30 @@ Show_Cursor:
 
 druk_wat_in_editor:
 	move.l	a0,(-4,a6)
-;	bne.s	.drukke
-;	rts
 	beq.w	clear_2_eol_edit
-;.drukke:
 
-	lea	(regel_buffer-DT,a4),a1
-	move.l	a1,a2
-;	move.l	a1,Edit_begin
-;	move.l	a1,a5	;x-offset
-	clr.l	Edit_begin
-;	sub.l	a3,a3		;x-offset
+	;lea	(line_buffer-DT,a4),a1
+	;move.l	a1,a2
+	clr.l	LinePrintStartPos
 
-	lea	(regel_buffer-DT,a4),a1
+	lea	(line_buffer-DT,a4),a1
 	move.l	a1,a2
 
 	move	(YposScreen-DT,a4),-(sp)
 
-	btst	#0,(PR_LineNrs).l		;line numbers printen..
-	beq.b	Print_LineNbrs
-
-;	bset	#MB1_REGEL_NIET_IN_SOURCE,(MyBits-DT,a4)
+	btst	#0,(PR_LineNrs).l
+	beq.b	.no_print_linenumbers
 
 	movem.l	d0-a6,-(sp)
 
 	move.l	(FirstLineNr-DT,a4),d0
 	add.l	d4,d0
 
-	lea	(regel_buffer-DT,a4),a1
+	lea	(line_buffer-DT,a4),a1
 	move.l	a1,a2
 
 	moveq.l	#5-1,d7
-.lopje:
-	divu.w	#10,d0
+.loop:	divu.w	#10,d0
 	swap	d0
 	tst.l	d0
 	bne.s	.nietmaskeren
@@ -2933,22 +2842,24 @@ druk_wat_in_editor:
 	move.b	d0,(a1,d7.w)
 	clr.w	d0
 	swap	d0
-	dbf	d7,.lopje
+	dbf	d7,.loop
 
 	addq.l	#5,a1
 
 	move.b	#' ',(a1)+
 	
 	bsr.w	print_regel_in_editor
-	lea	(regel_buffer-DT,a4),a1
+	lea	(line_buffer-DT,a4),a1
 	move.l	a1,a2
 
 	movem.l	(sp)+,d0-a6
-Print_LineNbrs:
+
+.no_print_linenumbers:
 	moveq	#0,d2
 	add	(YposScreen-DT,a4),d1
 
 	bclr	#MB1_BACKWARD_SELECT,(MyBits-DT,a4)
+
 ; *** Handles empty block
 ;	cmp.l	d5,d6
 ;	beq.b	.noprobsb
@@ -2964,20 +2875,65 @@ Print_LineNbrs:
 ;	bset	#MB1_BACKWARD_SELECT,(MyBits-DT,a4)
 	
 .noprobsb:
+
+	IF NEW_SELECT
+;================ NEW SELECTION STUFF =====================
+	; d5 = mark
+	; d6 = point
+	; if point < mark, exchange, set bit
+	; else, do nothing
+
+	; later, if bit is set, swap back
+
+	; a0 = ptr to start of current line
+	; d5 = mark
+	; d6 = point
+
+Edit_txt1:
+	cmp.l	#-1,d5
+	beq.s	.nomark
+
+	cmp.l	d5,d6			; mark == point
+	beq.s	.nomark
+
+	cmp.l	a0,d5
+	beq.s	.toggle			; we're at the mark
+
+	cmp.l	a0,d6
+	beq.s	.toggle			; we're at the point
+
+	bra	.Edit_txt3
+
+.nomark:
+	bclr	#MB1_BLOCKSELECT,(MyBits-DT,a4)
+	bra	.off
+
+.toggle:
+	bchg	#MB1_BLOCKSELECT,(MyBits-DT,a4)
+	bne.s	.off
+
+	bsr.w	get_font2
+	bra	.Edit_txt3
+
+.off:	bsr.w	get_font1
+;================ NEW SELECTION STUFF =====================
+
+;================ OLD SELECTION STUFF =====================
+	ELSE
 	bclr	#MB1_BLOCKSELECT,(MyBits-DT,a4)
 rrr:
-	cmp.l	a0,d5		;top ->|
-	bhs.b	Edit_txt1
-	cmp.l	a0,d6		;|->bot
-	bls.b	Edit_txt1
+	cmp.l	a0,d5
+	bhs.b	Edit_txt1		; start of line >= mark
+	cmp.l	a0,d6
+	bls.b	Edit_txt1		; start of line <= point
 
-	bsr.w	get_font2		;rest regels markblok
+	bsr.w	get_font2		; rest markblock?
 
 	bset	#MB1_BLOCKSELECT,(MyBits-DT,a4)
 
 Edit_txt1:
 	cmp.l	a0,d5
-	bne.b	.Edit_txt2
+	bne.b	.Edit_txt2		; char != mark
 
 	btst	#MB1_BACKWARD_SELECT,(MyBits-DT,a4)
 ;	bra.b	Verderbackwards
@@ -2989,25 +2945,28 @@ Edit_txt1:
 	bsr.w	print_regel_in_editor
 .noprint:
 	
-	lea	(regel_buffer-DT,a4),a1
+	lea	(line_buffer-DT,a4),a1
 	move.l	a1,a2
 
-	bsr.w	get_font2		;eerste regel markblok
+	bsr.w	get_font2		; first line markblock (tr?)
 	bset	#MB1_BLOCKSELECT,(MyBits-DT,a4)
 .Edit_txt2:
 	cmp.l	a0,d6
-	bne.b	.Edit_txt3
+	bne.w	.Edit_txt3		; char != point
 	move.l	d7,a0
 
 	btst	#MB1_BACKWARD_SELECT,(MyBits-DT,a4)
 	bne.b	.noprint2
 	bsr.w	print_regel_in_editor
 .noprint2:
-	lea	(regel_buffer-DT,a4),a1
+	lea	(line_buffer-DT,a4),a1
 	move.l	a1,a2
 
 	bclr	#MB1_BLOCKSELECT,(MyBits-DT,a4)
 	bsr.w	get_font1
+;================ OLD SELECTION STUFF =====================
+	ENDC	; NEW_SELECT
+
 .Edit_txt3:
 
 Verderbackwards:
@@ -3015,7 +2974,7 @@ Verderbackwards:
 	moveq	#0,d0
 	move.b	-1(a0),d3
 	move.b	(a0)+,d0
-	beq.w	einde_regel_ed		;klaar exit
+	beq.w	einde_regel_ed		; klaar exit
 
 	tst.b	PR_SyntaxColor
 	beq.w	.verder
@@ -3034,15 +2993,11 @@ Verderbackwards:
 	btst	#SC1_COMMENTAAR,(ScBits-DT,a4)
 	bne.w	.verder
 
-;	btst	#SC1_NOTBEGINLINE,(ScBits-DT,a4)
-;	bne.s	.nietbegin
-;	bset	#SC1_NOTBEGINLINE,(ScBits-DT,a4)
-
 	btst	#SC1_NOTBEGINLINE,(ScBits-DT,a4)
 	bne.b	.noopcode
-	cmp.b	#'	',d0
+	cmp.b	#$9,d0			; TAB
 	beq.w	.opcode
-	cmp.b	#' ',d0
+	cmp.b	#$20,d0			; SPC
 	beq.w	.opcode
 .noopcode:
 
@@ -3052,9 +3007,9 @@ Verderbackwards:
 	bne.s	.checklabel
 	cmp.b	#'-',(a0)
 	beq.w	.verder
-	cmp.b	#'	',-2(a0)
+	cmp.b	#$9,-2(a0)		; TAB
 	beq.s	.commentaar
-	cmp.b	#' ',-2(a0)
+	cmp.b	#$20,-2(a0)		; SPC
 	beq.s	.commentaar
 	btst	#SC1_NOTBEGINLINE,(ScBits-DT,a4)
 	beq.b	.commentaar
@@ -3068,11 +3023,7 @@ Verderbackwards:
 	btst	#SC1_NOTBEGINLINE,(ScBits-DT,a4)
 	bne.w	.verder
 
-;	cmp.b	#' ',d0
-;	beq.w	.verder
-;	cmp.b	#'	',d0
-;	beq.w	.verder
-	cmp.b	#$1A,d0		;einde source
+	cmp.b	#$1A,d0			; EOF
 	beq.w	.verder
 
 	move.w	#SC2_LABEL,(ScColor-DT,a4)
@@ -3080,19 +3031,19 @@ Verderbackwards:
 	bra.w	.verder
 
 .label:
-	cmp.b	#':',-2(a0)	;d0
+	cmp.b	#':',-2(a0)		; d0
 	beq.s	.oklabel
-	cmp.b	#'	',d0
+	cmp.b	#$9,d0			; TAB
 	beq.s	.oklabel
-	cmp.b	#' ',d0
+	cmp.b	#$20,d0			; SPC
 	beq.s	.oklabel
-	cmp.b	#'=',d0		;een= 20
+	cmp.b	#'=',d0			; een= 20
 	bne.w	.verder
 
 .oklabel:
 	bsr.w	print_regel_in_editor
 	bclr	#SC1_LABEL,(ScBits-DT,a4)
-	lea	(regel_buffer-DT,a4),a1
+	lea	(line_buffer-DT,a4),a1
 	move.l	a1,a2
 
 	bset	#SC1_WHITESP,(ScBits-DT,a4)
@@ -3100,7 +3051,7 @@ Verderbackwards:
 	bra.w	.verder
 
 .commentaar:
-	cmp.b	#"'",d3		;moet nog check voor 2x" of ' komen
+	cmp.b	#"'",d3			; moet nog check voor 2x" of ' komen
 	beq.w	.verder
 	cmp.b	#'"',d3
 	beq.s	.verder
@@ -3109,7 +3060,7 @@ Verderbackwards:
 
 	move.w	#SC2_COMMENTAAR,(ScColor-DT,a4)
 	bset	#SC1_COMMENTAAR,(ScBits-DT,a4)
-	lea	(regel_buffer-DT,a4),a1
+	lea	(line_buffer-DT,a4),a1
 	move.l	a1,a2
 .noprobs2:
 	bra.b	.verder
@@ -3119,9 +3070,9 @@ Verderbackwards:
 	bra.b	.verder
 
 .endwhitespace:
-	cmp.b	#'	',d0
+	cmp.b	#$9,d0			; TAB
 	beq.s	.verder
-	cmp.b	#' ',d0
+	cmp.b	#$20,d0			; SPC
 	beq.s	.verder
 
 	bclr	#SC1_WHITESP,(ScBits-DT,a4)
@@ -3132,7 +3083,7 @@ Verderbackwards:
 	beq.s	.commentaar
 
 	bsr.w	print_regel_in_editor
-	lea	(regel_buffer-DT,a4),a1
+	lea	(line_buffer-DT,a4),a1
 	move.l	a1,a2
 
 	move.w	#SC2_OPCODE,(ScColor-DT,a4)
@@ -3145,14 +3096,14 @@ Verderbackwards:
 ;	bra.b	.verder
 
 .endopcode:
-	cmp.b	#'	',d0
+	cmp.b	#$9,d0			; TAB
 	beq.s	.okop
-	cmp.b	#' ',d0
+	cmp.b	#$20,d0			; SPC
 	bne.s	.verder
 .okop:
 	bsr.w	print_regel_in_editor
 	bclr	#SC1_OPCODE,(ScBits-DT,a4)
-	lea	(regel_buffer-DT,a4),a1
+	lea	(line_buffer-DT,a4),a1
 	move.l	a1,a2
 
 	move.w	#SC2_NORMAAL,(ScColor-DT,a4)
@@ -3176,10 +3127,10 @@ Verderbackwards:
 .verder:
 	bset	#SC1_NOTBEGINLINE,(ScBits-DT,a4)
 
-	cmp.b	#9,d0
-	beq.b	Tab_in_source	;tab gevonden
-	cmp.b	#$1A,d0
-	beq.w	Edit_eindesource		;einde source
+	cmp.b	#9,d0			; TAB
+	beq.b	Tab_in_source
+	cmp.b	#$1A,d0			; EOF
+	beq.w	Edit_eindesource
 	addq.w	#1,d2
 	cmp	d1,d2
 	bcc.b	.Edit_txt6
@@ -3197,21 +3148,6 @@ Verderbackwards:
 	bra.b	.Edit_txt4
 
 
-;syntabje:
-;	dc.b	0	;A
-;	dc.b	1	;B
-;	dc.b	0	;C
-;	dc.b	0	;D
-;	dc.b	0	;E
-;	dc.b	0	;F
-;	dc.b	0	;G
-;
-;	cnop	0,4
-	
-;UnFolded:
-;Folded:
-
-
 Tab_in_source:
 	subq.w	#1,(sp)
 	bmi.b	C1A88
@@ -3219,14 +3155,6 @@ Tab_in_source:
 .lopje:
 	addq.w	#1,d2
 	moveq	#0,d0
-	bsr.w	C135A
-	tst.b	(B30047-DT,a4)
-	beq.b	C1A48
-	subq.w	#1,(sp)
-	bmi.b	C1A58
-	cmp	d2,d0
-	bne.b	.lopje
-	bra.w	Edit_txt1
 
 C1A48:
 	subq.w	#1,(sp)
@@ -3248,12 +3176,6 @@ C1A64:
 	move.b	d0,(a1)+
 C1A68:
 	moveq	#0,d0
-	bsr.w	C135A
-	tst.b	(B30047-DT,a4)
-	beq.b	C1A7C
-	cmp	d2,d0
-	bne.b	C1A5A
-	bra.w	Edit_txt1
 
 C1A7C:
 	move	d2,d0
@@ -3272,12 +3194,6 @@ C1A96:
 	move.b	d0,(a1)+
 C1A9A:
 	moveq	#0,d0
-	bsr.w	C135A
-	tst.b	(B30047-DT,a4)
-	beq.b	C1AB0
-	cmp	d2,d0
-	bne.b	Tab_in_source
-	bra.w	Edit_txt1
 
 C1AB0:
 	move	d2,d0
@@ -3286,7 +3202,7 @@ C1AB0:
 	bra.w	Edit_txt1
 
 Edit_eindesource:
-	lea	(END.MSG).l,a0
+	lea	(EOF.MSG).l,a0
 	bra.w	Edit_txt1
 
 einde_regel_ed:
@@ -3335,19 +3251,19 @@ C1AFC:
 print_regel_in_editor:
 	movem.l	d0-a6,-(sp)
 
-	move.l	Edit_begin,d0			;x-offset
+	move.l	LinePrintStartPos,d0	; x-offset
 
-	move.l	a1,d6
-	sub.l	a2,d6				;string length
-	beq.s	.klaar
+	move.l	a1,d6			; a1 = point, a2 = BOL
+	sub.l	a2,d6			; string length
+	beq.s	.done
 
-	add.l	d6,Edit_begin
+	add.l	d6,LinePrintStartPos
 
 	mulu.w	(EFontSize_x-DT,a4),d0
 	
-	move.w	d4,d1				;y
+	move.w	d4,d1			; y
 	mulu.w	(EFontSize_y-DT,a4),d1
-	add.w	(Scr_Title_sizeTxt-DT,a4),d1	;!2
+	add.w	(Scr_Title_sizeTxt-DT,a4),d1	; !2
 
 	move.l	(GfxBase-DT,a4),a6
 	move.l	(Rastport-DT,a4),a1
@@ -3358,12 +3274,11 @@ print_regel_in_editor:
 	move.w	(ScColor-DT,a4),d0
 	bsr.b	get_fontcolor
 
-	lea	(regel_buffer-DT,a4),a0		;edit
-	move.w	d6,d0				;count
+	lea	(line_buffer-DT,a4),a0	; edit
+	move.w	d6,d0			; count
 	jsr	_LVOText(a6)
 
-.klaar:
-	movem.l	(sp)+,d0-a6
+.done:	movem.l	(sp)+,d0-a6
 	rts
 
 ;d0 hi=bpen low=apen
@@ -3372,7 +3287,7 @@ get_fontcolor:
 
 	btst	#MB1_BLOCKSELECT,(MyBits-DT,a4)
 	beq.b	.nomarkblok
-	bset	#4,d0		;offset block mark
+	bset	#4,d0			; offset block mark
 		
 .nomarkblok:
 	lea	fontcolortab(pc),a1
@@ -3381,55 +3296,50 @@ get_fontcolor:
 	move.l	(GfxBase-DT,a4),a6
 	move.l	(Rastport-DT,a4),a1
 
-	jsr	(_LVOSetAPen,a6)	; ***
+	jsr	(_LVOSetAPen,a6)
 	swap	d0
-	jsr	(_LVOSetBPen,a6)	; ***
+	jsr	(_LVOSetBPen,a6)
 	movem.l	(sp)+,d0-d2/a0-a2/a6
 	rts
 
 
-; 0=grijs 1=zwart 2=wit 3=rood
+; 0=grey 1=black 2=white 3=purple
 fontcolortab:
-	dc.w	0,1	;SC2_NORMAAL
-	dc.w	0,3	;SC2_COMMENTAAR
-	dc.w	0,2	;SC2_LABEL
-	dc.w	4,2	;SC2_OPCODE
+	dc.w	0,1	; SC2_NORMAAL
+	dc.w	0,3	; SC2_COMMENTAAR
+	dc.w	0,1	; SC2_LABEL
+	dc.w	0,1	; SC2_OPCODE
 
-	dc.w	1,2	;INV SC2_NORMAAL
-	dc.w	1,3	;INV SC2_COMMENTAAR
-	dc.w	1,2	;INV SC2_LABEL
-	dc.w	1,3	;INV SC2_OPCODE
+	dc.w	1,2	; INV SC2_NORMAAL
+	dc.w	1,0	; INV SC2_COMMENTAAR
+	dc.w	1,2	; INV SC2_LABEL
+	dc.w	1,2	; INV SC2_OPCODE
 
 
-	cnop	0,4
-Edit_begin:	dc.l	0
+	even
+LinePrintStartPos:	dc.l	0
 
 ;**************************************************
 
 clear_2_eol_edit:
 	movem.l	d0-a6,-(sp)
 
-;	sub.l	a2,a1
-	move.l	Edit_begin,d6
-	clr.l	Edit_begin
-;	move.l	a3,d6
-
-;	move.l	a1,d6		;x-offset
-	move.w	d4,d7		;y-offset
+	move.l	LinePrintStartPos,d6
+	clr.l	LinePrintStartPos
+	move.w	d4,d7			; y
 
 	move.l	(GfxBase-DT,a4),a6
 	move.l	(Rastport-DT,a4),a1
 
-	move.w	d6,d0		;x
+	move.w	d6,d0			; x
 	mulu.w	(EFontSize_x-DT,a4),d0
 	
-;	move.l	(LineFromTop-DT,a4),d1	;y
 	move.w	d7,d1
 	mulu.w	(EFontSize_y-DT,a4),d1
-	add.w	(Scr_Title_sizeTxt-DT,a4),d1	;!2
-	jsr	(_LVOMove,a6)	; ***
+	add.w	(Scr_Title_sizeTxt-DT,a4),d1	; !2
+	jsr	(_LVOMove,a6)
 
- 	jsr	(_LVOClearEOL,a6)		; ***
+ 	jsr	(_LVOClearEOL,a6)
 	movem.l	(sp)+,d0-a6
 
 	rts
@@ -3440,208 +3350,166 @@ clear_2_eol_edit:
 
 UpdateAllLines:
 	move.l	(FirstLinePtr-DT,a4),a0
-	lea	(RegelPtrsOut-DT,a4),a5
+	lea	(LinePtrsOut-DT,a4),a5
 	move.l	a0,(a5)+
 
 	clr.l	d1
 	move	(NrOfLinesInEditor-DT,a4),d1
 	subq.l	#1,d1
-;	st	(LineFromTop-DT,a4)
 	move.l	d1,d3
 
 	moveq	#9,d5
 	move.b	(a2),d4
 	clr.b	(a2)+
-.loopje:
-	rept	5
+
+.loop:	rept	5
 	tst.b	(a0)+
-	beq.b	.EndLine
+	beq.b	.end
 	endr
 	tst.b	(a0)+
-	bne.b	.loopje
-.EndLine:
-	cmp.l	a0,a2
-	beq.b	CursorLineFound
+	bne.b	.loop
 
-;	cmp.b	#';',(a0)
-;	bne.s	.normal
-;	cmp.b	#'-',1(a0)
-;	bne.s	.normal
-;	bsr	Folding
-;	beq.w	C1CEA		;einde source ?
-;	bra.b	.Reenter
+.end:	cmp.l	a0,a2
+	beq.b	.CursorLineFound
 
 .normal:
 	move.l	a0,(a5)+
-;.Reenter:
-	dbra	d1,.loopje
+	dbra	d1,.loop
 	move.b	d4,-(a2)
 	rts
 
-CursorLineFound:
+.CursorLineFound:
 	move.b	d4,-(a2)
 	move.l	(-4,a5),a0
 	moveq	#-1,d2
-C1BBE:
+.C1BBE:
 	addq.w	#1,d2
 	cmp.l	a0,a2
-	beq.b	C1BE2
+	beq.b	.C1BE2
 	move.b	(a0)+,d0
 	cmp.b	d5,d0
-	bne.b	C1BBE
+	bne.b	.C1BBE
 	moveq	#-1,d0
-	bsr.w	C135A
-	tst.b	(B30047-DT,a4)
-	beq.b	C1BDC
-	move	d0,d2
-	bra.b	C1BBE
-
-C1BDC:
 	or.w	#7,d2
-	bra.b	C1BBE
+	bra.b	.C1BBE
 
-C1BE2:
+.C1BE2:
 	btst	#0,(PR_LineNrs).l
-	beq.b	C1C08
+	beq.b	.C1C08
 	movem.l	d0/d2,-(sp)
 	moveq	#0,d0
 	move	(Scr_br_chars-DT,a4),d0
 	subq.w	#6,d0
 	cmp	d0,d2
-	bge.b	C1C02
+	bge.b	.C1C02
 	movem.l	(sp)+,d0/d2
-	bra.b	C1C08
+	bra.b	.C1C08
 
-C1C02:
+.C1C02:
 	movem.l	(sp)+,d0/d2
-	bra.b	C1C24
-C1C08:
+	bra.b	.C1C24
+.C1C08:
 	cmp	(Scr_br_chars-DT,a4),d2
-	bge.b	C1C24
+	bge.b	.C1C24
 	tst	(YposScreen-DT,a4)
-	beq.b	C1C24
-	movem.l	d0-a6,-(sp)			; ***
+	beq.b	.C1C24
+	movem.l	d0-a6,-(sp)
 	clr	(YposScreen-DT,a4)
-	bsr.w	RegTab_SETALLNOTUPD
-	movem.l	(sp)+,d0-a6			; ***
-C1C24:
+	bsr.w	LineTab_SETALLNOTUPD
+	movem.l	(sp)+,d0-a6
+.C1C24:
 	sub	(YposScreen-DT,a4),d2
-	bsr.b	C1C60
+	bsr.b	.C1C60
 	move	d2,(NewCursorpos-DT,a4)
 	sub.l	d1,d3
 	move.l	d3,(LineFromTop-DT,a4)
 	move.l	a3,a0
-	move.l	(sourceend-DT,a4),a1
+	move.l	(SourceEnd-DT,a4),a1
 	move.b	(a1),d4
 	clr.b	(a1)+
-.loopje:
-	rept	5
+
+.loop2:	rept	5
 	tst.b	(a0)+
 	beq.b	.EndLine
 	endr
 	tst.b	(a0)+
-	bne.b	.loopje
+	bne.b	.loop2
 .EndLine:
 	cmp.l	a0,a1
-	beq.w	C1CEA
+	beq.w	.C1CEA
 
-;	cmp.b	#';',(a0)
-;	bne.s	.normal
-;	cmp.b	#'-',1(a0)
-;	bne.s	.normal
-;	bsr.s	Folding
-;	beq.w	C1CEA		;einde source
-;	bra.b	.Reenter
-;.normal:
 	move.l	a0,(a5)+
 .Reenter:
-	dbra	d1,.loopje
+	dbra	d1,.loop2
 	move.b	d4,-(a1)
 	rts
 
-;Folding:
-;	move.l	a0,(a5)+	;eerste regel wel in buffer zetten
-;	addq.w	#2,a0		;";-"
-;.loopje2:
-;	tst.b	(a0)+
-;	bne.b	.loopje2
-;
-;	cmp.l	a0,a1
-;	beq.s	.druut
-;		
-;	cmp.b	#';',(a0)+
-;	bne.s	.loopje2
-;	cmp.b	#'%',(a0)+	;end folding
-;	bne.s	.loopje2
-;.druut:
-;	rts
-
-C1C60:
+.C1C60:
 	movem.l	d0/d1/d3-d7/a0-a6,-(sp)
-C1C64:
+.C1C64:
 	move.l	d2,-(sp)
 
 	btst	#0,(PR_LineNrs).l
-	beq.b	C1C8E
+	beq.b	.C1C8E
 
 	cmp	#14,d2
-	blt.b	C1CC8
+	blt.b	.C1CC8
 	move.l	d0,-(sp)
 	moveq	#0,d0
 	move	(Scr_br_chars-DT,a4),d0
 	sub	#7,d0
 	cmp	d0,d2
-	blt.b	C1C8A
+	blt.b	.C1C8A
 	move.l	(sp)+,d0
-	bra.b	C1CA4
+	bra.b	.C1CA4
 
-C1C8A:
+.C1C8A:
 	move.l	(sp)+,d0
-	bra.b	C1CC0
+	bra.b	.C1CC0
 
-C1C8E:
+.C1C8E:
 	cmp	#8,d2
-	blt.b	C1CC8
+	blt.b	.C1CC8
 	move.l	d0,-(sp)
 	moveq	#0,d0
 	move	(Scr_br_chars-DT,a4),d0
 	subq.w	#1,d0
 	cmp	d0,d2
-	blt.b	C1C8A
+	blt.b	.C1C8A
 	move.l	(sp)+,d0
-C1CA4:
+.C1CA4:
 	cmp	#$00F8,(YposScreen-DT,a4)
-	bge.b	C1CC0
+	bge.b	.C1CC0
 	add	#12,(YposScreen-DT,a4)
 	sub	#12,d2
 	move.l	d2,(sp)
-	bsr.w	RegTab_SETALLNOTUPD
+	bsr.w	LineTab_SETALLNOTUPD
 	move.l	(sp)+,d2
-	bra.b	C1C64
+	bra.b	.C1C64
 
-C1CC0:
+.C1CC0:
 	move.l	(sp)+,d2
 	movem.l	(sp)+,d0/d1/d3-d7/a0-a6
 	rts
 
-C1CC8:
+.C1CC8:
 	tst	(YposScreen-DT,a4)
-	beq.b	C1CE2
+	beq.b	.C1CE2
 	sub	#12,(YposScreen-DT,a4)
 	add	#12,d2
 	move.l	d2,(sp)
-	bsr.w	RegTab_SETALLNOTUPD
+	bsr.w	LineTab_SETALLNOTUPD
 	move.l	(sp)+,d2
-	bra.b	C1C64
+	bra.b	.C1C64
 
-C1CE2:
+.C1CE2:
 	move.l	(sp)+,d2
 	movem.l	(sp)+,d0/d1/d3-d7/a0-a6
 	rts
 
-C1CEA:
+.C1CEA:
 	clr.l	(a5)+
-	dbra	d1,C1CEA
+	dbra	d1,.C1CEA
 	move.b	d4,-(a1)
 	rts
 
@@ -3653,9 +3521,9 @@ get_font1:
 	move.l	(Rastport-DT,a4),a1
 
 	moveq.l	#1,d0		;black
-	jsr	(_LVOSetAPen,a6)		; ***
+	jsr	(_LVOSetAPen,a6)
 	moveq.l	#0,d0		;grey
-	jsr	(_LVOSetBPen,a6)		; ***
+	jsr	(_LVOSetBPen,a6)
 	movem.l	(sp)+,d0-d2/a0-a2/a6
 	rts
 
@@ -3665,9 +3533,9 @@ get_font2:
 	move.l	(Rastport-DT,a4),a1
 
 	moveq.l	#2,d0		;white
-	jsr	(_LVOSetAPen,a6)		; ***
+	jsr	(_LVOSetAPen,a6)
 	moveq.l	#1,d0		;black
-	jsr	(_LVOSetBPen,a6)		; ***
+	jsr	(_LVOSetBPen,a6)
 	movem.l	(sp)+,d0-d2/a0-a2/a6
 	rts
 
@@ -3677,9 +3545,9 @@ get_font3:
 	move.l	(Rastport-DT,a4),a1
 
 	moveq.l	#0,d0		;grey
-	jsr	(_LVOSetAPen,a6)		; ***
+	jsr	(_LVOSetAPen,a6)
 	moveq.l	#1,d0		;black
-	jsr	(_LVOSetBPen,a6)		; ***
+	jsr	(_LVOSetBPen,a6)
 	movem.l	(sp)+,d0-d2/a0-a2/a6
 	rts
 
@@ -3689,9 +3557,9 @@ get_font4:
 	move.l	(Rastport-DT,a4),a1
 
 	moveq.l	#3,d0		;red
-	jsr	(_LVOSetAPen,a6)		; ***
+	jsr	(_LVOSetAPen,a6)
 	moveq.l	#0,d0		;grey
-	jsr	(_LVOSetBPen,a6)		; ***
+	jsr	(_LVOSetBPen,a6)
 	movem.l	(sp)+,d0-d2/a0-a2/a6
 	rts
 
@@ -3701,9 +3569,9 @@ get_font5:
 	move.l	(Rastport-DT,a4),a1
 
 	moveq.l	#3,d0		;red
-	jsr	(_LVOSetAPen,a6)		; ***
+	jsr	(_LVOSetAPen,a6)
 	moveq.l	#1,d0		;black
-	jsr	(_LVOSetBPen,a6)		; ***
+	jsr	(_LVOSetBPen,a6)
 	movem.l	(sp)+,d0-d2/a0-a2/a6
 	rts
 
@@ -3713,9 +3581,9 @@ get_font_grey_on_black:
 	move.l	(Rastport-DT,a4),a1
 
 	moveq.l	#0,d0		;red
-	jsr	(_LVOSetAPen,a6)		; ***
+	jsr	(_LVOSetAPen,a6)
 	moveq.l	#1,d0		;black
-	jsr	(_LVOSetBPen,a6)		; ***
+	jsr	(_LVOSetBPen,a6)
 	movem.l	(sp)+,d0-d2/a0-a2/a6
 	rts
 
@@ -3752,12 +3620,12 @@ jump_in:
 	mulu.w	(EFontSize_y-DT,a4),d1
 .okay2:
 	add.w	(Scr_Title_sizeTxt-DT,a4),d1	;!2
-	jsr	(_LVOMove,a6)		; ***
+	jsr	(_LVOMove,a6)
 
 
 	lea     printable_char2,a0
 	moveq.l	#1,d0		;count
-	jsr	(_LVOText,a6)		; ***
+	jsr	(_LVOText,a6)
 
 	movem.l	(sp)+,d0-a6
 	addq.l	#1,a1
@@ -3972,7 +3840,7 @@ C1EF6:
 	bsr.b	C1F2C
 C1F0E:
 	movem.l	(sp)+,d0-d6/a0-a3/a5/a6
-	bsr.w	E_RemoveCutMarking
+	bsr.w	E_RemoveMark
 	bclr	#SB1_WINTITLESHOW,(SomeBits-DT,a4)
 	rts
 
@@ -3987,11 +3855,11 @@ C1F2E:
 	lsr.w	#1,d5
 	bcc.b	C1F4A
 	move	d2,d0
-	jsr	(C149F0).l
+	jsr	(printCharInMenuStrip).l
 	move	d1,d0
-	jsr	(C149F0).l
+	jsr	(printCharInMenuStrip).l
 	moveq	#" ",d0
-	jsr	(C149F0).l
+	jsr	(printCharInMenuStrip).l
 C1F4A:
 	addq.b	#1,d1
 	cmp.b	#"8",d1
@@ -4014,81 +3882,134 @@ C1F64:
 
 C1F6C:
 	move.b	-(a0),d0
-	beq.b	C1F76
-	cmp.b	#$19,d0
+	beq.b	.end			; EOL
+	cmp.b	#$19,d0			; BOF
 	bne.b	C1F6C
-C1F76:
-	rts
+
+.end:	rts
 
 C1F78:
 	cmp.l	a0,a2
-	beq.b	C1F92
+	beq.b	.C1F92			; EOL
 	move.b	(a0)+,d0
-	cmp.b	#$1A,d0
-	beq.b	C1F92
+	cmp.b	#$1A,d0			; EOF
+	beq.b	.C1F92
 	cmp.b	#"a",d0
-	bcs.b	C1F8E
+	bcs.b	.C1F8E
 	sub.b	#" ",d0
-C1F8E:
+.C1F8E:
 	tst.b	d0
 	rts
 
-C1F92:
+.C1F92:
 	addq.l	#4,sp
 	bra.w	C1EF6
 
 ; ----
-E_Mark_blok:
+E_SetMark:
 	lea	-1.l,a0
-	cmp.l	a0,a6
-	bne.w	E_RemoveCutMarking
-	move.l	a2,a6			; *** Start address
-;	bsr	C14EC
-;	bsr	C14CC
-;	bsr	C16D8
-	bra.w	RegTab_SETALLNOTUPD
+	cmp.l	a0,a6			; mark alreay set?
+	bne.w	E_RemoveMark		; then remove it
+
+	move.l	a2,a6			; set mark to point
+	bra.w	LineTab_SETALLNOTUPD
 
 ; ----
-E_Cut_Block:
+	IF	CLIPBOARD
+E_CutBlock:
 	moveq	#0,d1
 	cmp.l	#-1,a6
-	beq.b	.NOBEGIN
+	beq.b	.end
 
-	cmp.l	a6,a2			; *** Empty block ?
-	beq.b	.NOBEGIN
-	bgt.b	.wrongway
+	cmp.l	a6,a2
+	beq.b	.end			; empty block
+	bgt.b	.skip			; point is after mark
 	exg.l	a2,a6
 	move.b	#1,(BlokBackwards-DT,a4)
-.wrongway:
-	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
-	move.l	(sourceend-DT,a4),a0
+
+.skip:	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
+
+	movem.l	d0-a6,-(sp)
+	move.l	a2,d1
+	sub.l	a6,d1			; d1 = num of bytes in block
+
+	move.l	a6,a1			; clip start
+	move.l	d1,d0			; clip len
+	jsr	Clip_Write
+	movem.l	(sp)+,d0-a6
+
+.noclip:				; old cut function basically
+	move.l	(SourceEnd-DT,a4),a0
 	addq.w	#1,a0
 	move.l	a6,d1
-	sub.l	a2,d1
+	sub.l	a2,d1			; d1 = num of bytes in block
 	move.l	a0,a1
 	sub.l	d1,a1
 	cmp.l	(WORK_ENDTOP-DT,a4),a1
-	bge.b	.NOBEGIN
+	bge.b	.end			; not enough workmem
 	move.l	a6,a1
-.lopje:
-	move.b	(a1)+,(a0)+
+
+.loop:	move.b	(a1)+,(a0)+		; copy selected block to cut buf
 	cmp.l	a2,a1
-	bne.b	.lopje
+	bne.b	.loop
+
 	bsr.w	MOVEMARKS
 	tst.b	(BlokBackwards-DT,a4)
-	beq.b	.notwrongway2
-	exg	a2,a6
-.notwrongway2:
-	move.l	a6,a2
-	move.b	#$1A,(a0)
-	move.l	a0,(Cut_Blok_End-DT,a4)
-.NOBEGIN:
-	clr.b	(BlokBackwards-DT,a4)
-	bra.w	E_RemoveCutMarking
+	beq.b	.skip2
+	exg	a2,a6			; restore point/mark order
+
+.skip2:	move.l	a6,a2
+	move.b	#$1A,(a0)		; EOF
+	move.l	a0,(Cut_Buffer_End-DT,a4)
+
+.end:	clr.b	(BlokBackwards-DT,a4)
+	bra.w	E_RemoveMark
+
+	ELSE	; CLIPBOARD
+
+E_CutBlock:
+	moveq	#0,d1
+	cmp.l	#-1,a6
+	beq.b	.end
+
+	cmp.l	a6,a2
+	beq.b	.end			; empty block
+	bgt.b	.skip			; point is after mark
+	exg.l	a2,a6
+	move.b	#1,(BlokBackwards-DT,a4)
+
+.skip:	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
+	move.l	(SourceEnd-DT,a4),a0
+	addq.w	#1,a0
+	move.l	a6,d1
+	sub.l	a2,d1			; d1 = num of bytes in block
+	move.l	a0,a1
+	sub.l	d1,a1
+	cmp.l	(WORK_ENDTOP-DT,a4),a1
+	bge.b	.end			; not enough workmem
+	move.l	a6,a1
+
+.loop:	move.b	(a1)+,(a0)+		; copy selected block to cut buf
+	cmp.l	a2,a1
+	bne.b	.loop
+
+	bsr.w	MOVEMARKS
+	tst.b	(BlokBackwards-DT,a4)
+	beq.b	.skip2
+	exg	a2,a6			; restore point/mark order
+
+.skip2:	move.l	a6,a2
+	move.b	#$1A,(a0)		; EOF
+	move.l	a0,(Cut_Buffer_End-DT,a4)
+
+.end:	clr.b	(BlokBackwards-DT,a4)
+	bra.w	E_RemoveMark
+
+	ENDIF	; CLIPBOARD
 
 ; ----
-E_Copy_blok:
-	move.l	(Mark1set-DT,a4),-(sp)
+E_CopyBlock:
+	move.l	(Mark1set-DT,a4),-(sp)	; save marks
 	move.l	(Mark2set-DT,a4),-(sp)
 	move.l	(Mark3set-DT,a4),-(sp)
 	move.l	(Mark4set-DT,a4),-(sp)
@@ -4098,11 +4019,11 @@ E_Copy_blok:
 	move.l	(Mark8set-DT,a4),-(sp)
 	move.l	(Mark9set-DT,a4),-(sp)
 	move.l	(Mark10set-DT,a4),-(sp)
-	move.l	a2,-(sp)
-	bsr.w	E_Cut_Block
+	move.l	a2,-(sp)		; save point
+	bsr.w	E_CutBlock
 	bclr	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
-	move.l	(sp)+,a2
-	move.l	(sp)+,(Mark10set-DT,a4)
+	move.l	(sp)+,a2		; restore point
+	move.l	(sp)+,(Mark10set-DT,a4)	; restore marks
 	move.l	(sp)+,(Mark9set-DT,a4)
 	move.l	(sp)+,(Mark8set-DT,a4)
 	move.l	(sp)+,(Mark7set-DT,a4)
@@ -4115,216 +4036,90 @@ E_Copy_blok:
 	rts
 
 ; ----
-E_SmartPast:
+E_SmartPaste:	; pastes and moves cursor to same start position on next line
 	move	(NewCursorpos-DT,a4),-(sp)
-	bsr.b	E_Fill
+	bsr.w	E_Fill
 	bsr.w	E_Move2BegLine
 	move	(sp)+,(NewCursorpos-DT,a4)
-	bra.w	C14EC
+	bra.w	E_Move2EOL
 
 ; ----
 E_ClipPast:
-	IF	CLIPBOARD
-
-	move.l	(sourceend-DT,a4),a0
-;	move.l	(Cut_Blok_End-DT,a4),a1
-	addq.w	#1,a0
-;	sub.l	a0,a1
-
-	movem.l	a0/a2-a6,-(sp)
-	bsr	SetupClipboard
-	bsr	ClipGetLength	;a1 is lengte (a1=0 -> error)
-	movem.l	(sp)+,a0/a2-a6
-	
-	move.l	a1,d4
-	move.l	a3,d0
-	sub.l	a2,d0
-	cmp.l	d4,d0
-	bcc.b	.DontOpen
-	cmp.l	#256,d0
-	bcc.b	.NotExtra
-	add	#256,a1
-.NotExtra:
-	bsr	EDITOR_MAKEHOLE_A1LONG
-	move.l	(sourceend-DT,a4),a0
-	addq.w	#1,a0
-.DontOpen:
-;	move.l	(Cut_Blok_End-DT,a4),a1
-	cmp.l	a2,a3
-	beq.b	.End
-	move.l	a3,d0
-	sub.l	a2,d0
-	cmp.l	d4,d0
-	bcs.b	.End
-
-	move.l	d4,d0	;lengte?
-	move.l	d0,d1
-	bsr	MOVEMARKS
-
-;	jsr	test_debug
-
-	bsr	ClipRead2Buf
-	add.l	d4,a0
-	add.l	d4,a2
-
-;	jsr	test_debug
-
-	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
-.End:
-	br	RegTab_SETALLNOTUPD
-
-ClipRead2Buf:
-	movem.l	a0/a2-a6,-(sp)
-	move.l	4.w,a6				; ***
-	move.l	ClipIoReq,a1
-	move.l	a2,io_Data(a1)
-	move.l	dataheader+16,io_Length(a1)
-	jsr	_LVODoIO(a6)
-	movem.l	(sp)+,a0/a2-a6
 	rts
-
-ClipGetLength:
-	move.l	4.w,a6				; ***
-	move.l	ClipIoReq,a1
-	move.l	#0,io_Offset(a1)
-	move.b	#0,io_Error(a1)
-	move.l	#0,io_ClipID(a1)
-
-	move.w	#CMD_READ,io_Command(a1)
-	move.l	#dataheader,io_Data(a1)
-	move.l	#20,io_Length(a1)
-	jsr	_LVODoIO(a6)
-
-	;"FORMxxxxFTXTCHRSxxxx"
-	cmp.l	#'FTXT',dataheader+8
-	bne.s	.errorNoTxt
-	cmp.l	#'CHRS',dataheader+12
-	bne.s	.errorNoTxt
-	move.l	dataheader+16,a1
-	rts
-
-.errorNoTxt:
-;	move.l	#0,a1	;noclip
-	sub.l	a1,a1
-	rts
-
-FinishClipboard:
-	move.l	$4.w,a6
-	;read with offset past the end of the clip to signify the end..
-	move.l	ClipIoReq,a1
-	move.w	#CMD_READ,io_Command(a1)
-	move.l	#0,io_Data(a1)
-	move.l	#1,io_Length(a1)
-	jsr	_LVODoIO(a6)
-	rts
-
-CloseClipboard:
-	move.l	4.w,a6				; ***
-;	move.l	ClipIoReq(pc),a1
-;	jsr	_LVOAbortIO(a6)
-	move.l	ClipIoReq(pc),a1
-	jsr	_LVOCloseDevice(a6)
-
-	move.l	ClipIoReq,a0
-	jsr	_LVODeleteIORequest(a6)
-
-	move.l	ClipMsgport(pc),a0
-	jsr	_LVODeleteMsgPort(a6)
-	rts
-
-
-SetupClipboard:
-	move.l	4.w,a6					; ***
-	jsr	_LVOCreateMsgPort(a6)
-	move.l	d0,ClipMsgport
-
-	move.l	d0,a0		;msg port
-	moveq.l	#iocr_SIZEOF,d0		;size
-	jsr	_LVOCreateIORequest(a6)
-	move.l	d0,ClipIoReq
-
-	moveq.l	#0,d0		;unit
-	lea	clipname(pc),a0
-	moveq.l	#0,d1		;flags
-	move.l	ClipIoReq(pc),a1	;ioRequest
-	jsr	_LVOOpenDevice(a6)
-	rts
-
-
-clipname:
-	dc.b	"clipboard.device",0
-
-	cnop	0,4
-ClipMsgport:	dc.l	0
-ClipIoReq:	dc.l	0
-
-dataheader:	blk.b	20
-
-;***************************************************
-;	ELSE
-	ENDIF
 
 ; ----
-E_Fill:
-	move.l	(sourceend-DT,a4),a0
-	move.l	(Cut_Blok_End-DT,a4),a1
-	addq.l	#1,a0				; ***
+	IF	CLIPBOARD
+E_Fill:	; "paste"
+
+	; TODO: check if clipboard enabled
+
+	movem.l	d0-a6,-(sp)
+	move.l	(SourceEnd-DT,a4),a1
+	addq.l	#1,a1
+	jsr	Clip_Read
+	movem.l	(sp)+,d0-a6
+
+.noclip:				; old E_Fill function basically
+	move.l	(SourceEnd-DT,a4),a0
+	move.l	(Cut_Buffer_End-DT,a4),a1
+	addq.l	#1,a0
 	sub.l	a0,a1
 	tst.l	a1
-	bgt.b	.ok				;Fixed pointer bug when pasting
+	bgt.b	.skip			; Fixed pointer bug when pasting
 	rts
-.ok
 
-	move.l	a1,d4
+.skip:	move.l	a1,d4
 	move.l	a3,d0
 	sub.l	a2,d0
 	cmp.l	d4,d0
-	bcc.b	.DontOpen
+	bcc.b	.ok			; cut buffer is big enough?
 	cmp.l	#256,d0
-	bcc.b	.NotExtra
-	lea.l	256(a1),a1			; *** Was add.w
-.NotExtra:
-	bsr.w	EDITOR_MAKEHOLE_A1LONG
-	move.l	(sourceend-DT,a4),a0
-	addq.l	#1,a0				; *** Was addq.w
-.DontOpen:
-	move.l	(Cut_Blok_End-DT,a4),a1
+	bcc.b	.ext
+	lea.l	256(a1),a1		; add 256 more bytes
+
+.ext:	bsr.w	E_ExtendCutBuffer
+	move.l	(SourceEnd-DT,a4),a0
+	addq.l	#1,a0
+
+.ok:	move.l	(Cut_Buffer_End-DT,a4),a1
 	cmp.l	a2,a3
-	beq.b	.End
+	beq.b	.end
 	move.l	a3,d0
 	sub.l	a2,d0
 	cmp.l	d4,d0
-	bcs.b	.End
+	bcs.b	.end
 	sub.l	a0,a1
 	move.l	a1,d0
 	move.l	d0,d1
-	move.l	d1,-(a7)			; ***
+	move.l	d1,-(a7)
 	bsr.w	MOVEMARKS
 	subq.l	#1,d0
-	bmi.b	.End
+	bmi.b	.end
 	move.l	d0,d1
 	swap	d1
-.Loopje:
-	move.b	(a0)+,(a2)+
-	dbra	d0,.Loopje
-	dbra	d1,.Loopje
+
+.loop:	move.b	(a0)+,(a2)+
+	dbra	d0,.loop
+	dbra	d1,.loop
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 
 	; *** All this block has been added
 	; Number of chars in copy block
-	move.l	(a7),d1				; ***
+	move.l	(a7),d1
+
 	; Check if the editor should scroll down
 	; by counting the number of line(s) we have
 	; in the copy block and checking it with the caret position
 	move.l	d2,-(a7)
 	; (At least one line without EOL)
 	moveq	#1,d2
-	bsr.b	MoveDownNChars
+	bsr.b	Cut_Buffer_PlacePoint
 	; d1=number of lines added
 	move.l	d2,d1
 	move.l	(a7)+,d2
+
 	; Restore the values
-	moveq	#0,d0					; ***
+	moveq	#0,d0
 	move	(NrOfLinesInEditor-DT,a4),d0
 	subq.w	#1,d0
 	sub.l	d1,d0
@@ -4333,31 +4128,113 @@ E_Fill:
 	move.l	(LineFromTop-DT,a4),d1
 	sub.l	d0,d1
 	bsr.w	MoveDownNLines
+
 .NoScrollFill:
-	addq.l	#4,a7				; *** Discard the value
-.End:	bra.w	RegTab_SETALLNOTUPD
+	addq.l	#4,a7				; Discard the value
+
+.end:	bra.w	LineTab_SETALLNOTUPD
+
+	ELSE	; CLIPBOARD
+
+E_Fill:	; "paste"
+	move.l	(SourceEnd-DT,a4),a0
+	move.l	(Cut_Buffer_End-DT,a4),a1
+	addq.l	#1,a0
+	sub.l	a0,a1
+	tst.l	a1
+	bgt.b	.skip			; Fixed pointer bug when pasting
+	rts
+
+.skip:	move.l	a1,d4
+	move.l	a3,d0
+	sub.l	a2,d0
+	cmp.l	d4,d0
+	bcc.b	.ok			; cut buffer is big enough?
+	cmp.l	#256,d0
+	bcc.b	.ext
+	lea.l	256(a1),a1		; add 256 more bytes
+
+.ext:	bsr.w	E_ExtendCutBuffer
+	move.l	(SourceEnd-DT,a4),a0
+	addq.l	#1,a0
+
+.ok:	move.l	(Cut_Buffer_End-DT,a4),a1
+	cmp.l	a2,a3
+	beq.b	.end
+	move.l	a3,d0
+	sub.l	a2,d0
+	cmp.l	d4,d0
+	bcs.b	.end
+	sub.l	a0,a1
+	move.l	a1,d0
+	move.l	d0,d1
+	move.l	d1,-(a7)
+	bsr.w	MOVEMARKS
+	subq.l	#1,d0
+	bmi.b	.end
+	move.l	d0,d1
+	swap	d1
+
+.loop:	move.b	(a0)+,(a2)+
+	dbra	d0,.loop
+	dbra	d1,.loop
+	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
+
+	; *** All this block has been added
+	; Number of chars in copy block
+	move.l	(a7),d1
+
+	; Check if the editor should scroll down
+	; by counting the number of line(s) we have
+	; in the copy block and checking it with the caret position
+	move.l	d2,-(a7)
+	; (At least one line without EOL)
+	moveq	#1,d2
+	bsr.b	Cut_Buffer_PlacePoint
+	; d1=number of lines added
+	move.l	d2,d1
+	move.l	(a7)+,d2
+
+	; Restore the values
+	moveq	#0,d0
+	move	(NrOfLinesInEditor-DT,a4),d0
+	subq.w	#1,d0
+	sub.l	d1,d0
+	cmp.l	(LineFromTop-DT,a4),d0
+	bcc.b	.NoScrollFill
+	move.l	(LineFromTop-DT,a4),d1
+	sub.l	d0,d1
+	bsr.w	MoveDownNLines
+
+.NoScrollFill:
+	addq.l	#4,a7				; Discard the value
+
+.end:	bra.w	LineTab_SETALLNOTUPD
+
+	ENDIF	; CLIPBOARD
 
 ; *** Move down N chars
 ; (The copy block is placed right after the
 ; current sourcecode in the workspace)
-MoveDownNChars:
-	move.l	(sourceend-DT,a4),a0
+
+Cut_Buffer_PlacePoint:
+	move.l	(SourceEnd-DT,a4),a0
 	addq.l	#1,a0
-.lopje:
-	move.b	(a0)+,d0
+
+.loop:	move.b	(a0)+,d0
 	subq.l	#1,d1
 	beq.b	.end
-	cmp.b	#$1A,d0
+	cmp.b	#$1A,d0			; EOF
 	beq.b	.end
-	tst.b	d0
-	bne.b	.lopje
-	addq.l	#1,d2
-	jmp	.lopje
+	tst.b	d0			; EOL
+	bne.b	.loop
+	addq.l	#1,d2			; increment line counter
+	jmp	.loop
 .end:	rts
 
 E_WriteBlock:
 	cmp.l	a6,a2
-	bls.w	E_RemoveCutMarking
+	bls.w	E_RemoveMark
 	movem.l	a2/a6,-(sp)
 	lea	(End_msg).l,a0
 	jsr	(druk_status_en_end_af).l
@@ -4367,8 +4244,8 @@ E_WriteBlock:
 	clr.l	(FileLength-DT,a4)
 	bclr	#SB3_EDITORMODE,(SomeBits3-DT,a4)	;uit editor
 	moveq	#7,d0
-	jsr	scroll_up_cmd_fix	;;
-	jsr	(FileReqStuff).l
+	jsr	scroll_up_cmd_fix
+	jsr	(ShowFileReq).l
 	jsr	(IO_OpenFile).l
 	movem.l	(sp)+,a2/a6
 	move.l	a6,d2
@@ -4401,7 +4278,7 @@ E_WriteBlock:
 	beq.b	.nosave2
 	jsr	IO_WriteFile
 .nosave2:
-	jsr	close_bestand		;klaar met writen
+	jsr	IO_CloseFile		;klaar met writen
 	jmp	CommandlineInputHandler
 
 .returnmark:
@@ -4420,7 +4297,7 @@ E_UppercaseBlock:
 
 E_BlockChangeCase:
 	cmp.l	a6,a2
-	bls.b	E_RemoveCutMarking
+	bls.b	E_RemoveMark
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 	move.l	a6,-(sp)
 
@@ -4437,33 +4314,32 @@ E_BlockChangeCase:
 	move.l	(sp)+,a6
 
 ; ----
-E_RemoveCutMarking:
+E_RemoveMark:
 	lea	-1.l,a6
-	bra.w	RegTab_SETALLNOTUPD
+	bra.w	LineTab_SETALLNOTUPD
 
 ; ----
 ; spaces to tab option
 E_SpaceToTabBlock:
 	moveq	#" ",d1
 	cmp.l	a6,a2
-	bls.b	E_RemoveCutMarking
+	bls.b	E_RemoveMark
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 	pea.l	(a6)
-DoSTT:
-	move.b	(a6)+,d0
+
+.loop:	move.b	(a6)+,d0
 	cmp.b	d1,d0
-	bne.b	CheckSTT
+	bne.b	.check
 	move.b	#9,(-1,a6)
-CheckSTT:
-	cmp.l	a6,a2
-	bne.b	DoSTT
+.check:	cmp.l	a6,a2
+	bne.b	.loop
 	move.l	(sp)+,a6
-	bra.b	E_RemoveCutMarking
+	bra.b	E_RemoveMark
 
 ; ----
-E_Rotate_Block:
+E_RotateBlock:
 	cmp.l	a6,a2
-	bls.b	E_RemoveCutMarking
+	bls.b	E_RemoveMark
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 	movem.l	a2/a6,-(sp)
 C21A8:
@@ -4512,34 +4388,33 @@ C21F0:
 	move.l	(LineFromTop-DT,a4),d1
 	add.l	d1,(FirstLineNr-DT,a4)
 	beq.b	C2206
-	bsr.w	MoveupNLines
+	bsr.w	MoveUpNLines
 C2206:
 	movem.l	(sp)+,a2/a6
-	bra.w	E_RemoveCutMarking
+	bra.w	E_RemoveMark
 
 ; ----
-E_Delete_blok:
+E_DeleteBlock:
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 	bsr.w	E_Move2BegLine
 	move.l	a6,-(sp)
 	move.l	a2,a6
 	bsr.w	E_Move2EndLine
 	bsr.w	E_NextCharacter
-	bsr.w	E_Cut_Block
+	bsr.w	E_CutBlock
 	move.l	(sp)+,a6
 	rts
 
-E_Delete2bol:
+E_Delete2BOL:
 	move.b	(-1,a2),d0
 	beq.b	.end
-	cmp.b	#$19,d0
+	cmp.b	#$19,d0			; BOF
 	beq.b	.end
 
-	bsr.w	EDITOR_Backspace
-	bra.b	E_Delete2bol
+	bsr.w	E_Backspace
+	bra.b	E_Delete2BOL
 
-.end:
-	rts
+.end:	rts
 
 
 LoadWordToRegister:	; a6 = the register to load
@@ -4551,10 +4426,10 @@ LoadWordToRegister:	; a6 = the register to load
 	movem.l	(sp)+,d0/a0-a6
 	rts
 .getchar:
-	move.b	(a2),d0
+	move.b	(a3),d0
 	rts
 .movechar:
-	move.b	(a2)+,(a6)+
+	move.b	(a3)+,(a6)+
 	rts
 
 
@@ -4565,20 +4440,22 @@ E_SearchWordUnderCursor:
 	add.l	(LineFromTop-DT,a4),d0
 	move.l	d0,(OldLinePos-DT,a4)
 	clr.l	(OldCursorpos-DT,a4)
+	move.b	#1,(CaseSenceSearch).l
 
-	lea	(SourceCode-DT,a4),a6		; load search term
+	lea	(SourceCode-DT,a4),a6	; load search term
+	move.b	#0,(a6)
 	bsr.w	LoadWordToRegister
 
-	move.l	a6,a5				; filter itself
+	move.l	a6,a5			; filter itself
 	jsr	Filter_inputtext
 
-	lea	-1.l,a6				; no block selection	
+	lea	-1.l,a6			; no block selection	
 	bsr.w	EDITOR_SEARCH
 	bra.w	Show_lastline
 
 
 testwhitespace:	; d0 = char to check
-	cmp.b	#$9,d0				; TAB
+	cmp.b	#$9,d0			; TAB
 	beq.b	.end
 	cmp.b	#' ',d0
 .end:	rts
@@ -4589,13 +4466,13 @@ testwordchar:	; d0 = char to check
 	blo.s	.end
 	cmp.b	#'9',d0
 	bhi.s	.checkupper
-	bra.s	.found				; it's a digit
+	bra.s	.found			; it's a digit
 .checkupper:
 	cmp.b	#'A',d0
 	blo.s	.end
 	cmp.b	#'Z',d0
 	bhi.s	.checklower
-	bra.s	.found				; it's an uppercase letter
+	bra.s	.found			; it's an uppercase letter
 .checklower:
 	cmp.b	#'_',d0
 	beq	.found
@@ -4648,7 +4525,7 @@ WordOperation:	; a0 = getchar, a1 = deletechar
 E_DeleteWordBackwards:
 	movem.l	a0-a1,-(sp)
 	lea	.getchar,a0
-	lea	EDITOR_Backspace,a1
+	lea	E_Backspace,a1
 	bsr.w	WordOperation
 	movem.l	(sp)+,a0-a1
 	rts
@@ -4660,7 +4537,7 @@ E_DeleteWordBackwards:
 E_DeleteWordForwards:
 	movem.l	a0-a1,-(sp)
 	lea	.getchar,a0
-	lea	Delete,a1
+	lea	E_Delete,a1
 	bsr.w	WordOperation
 	movem.l	(sp)+,a0-a1
 	rts
@@ -4669,16 +4546,15 @@ E_DeleteWordForwards:
 	rts
 
 
-E_Delete2eol:
-	move.b	(a3),d0
+E_Delete2EOL:
+	move.b	(a3),d0			; EOL
 	beq.b	.end
-	cmp.b	#$1A,d0
+	cmp.b	#$1A,d0			; EOF
 	beq.b	.end
-	bsr.w	Delete
-	bra.b	E_Delete2eol
+	bsr.w	E_Delete
+	bra.b	E_Delete2EOL
 
-.end:
-	rts
+.end:	rts
 
 ;**********************
 ;*   SEARCH REPLACE   *
@@ -4744,8 +4620,6 @@ Show_lastline:
 ;; Changes stuff like move.l #$534F4C4F,d0 -> move.l #"SOLO",d0
 
 E_Hex2Ascii:
-;	jsr	test_debug
-Nr2Ascii:
 	moveq.l	#0,d0
 	moveq.l	#0,d1
 	moveq.l	#0,d3
@@ -4793,7 +4667,7 @@ Nr2Ascii:
 	moveq.l	#0,d3		;non ascii shift value :)
 	moveq.l	#2,d4		;str length '""'
 
-	move.l	(sourceend-DT,a4),a1
+	move.l	(SourceEnd-DT,a4),a1
 	addq.l	#1,a1
 	move.b	#'"',(a1)+
 	moveq.l	#4-1,d7
@@ -4888,10 +4762,10 @@ nr2AsciiFinish:
 .exit2:
 	move.b	#0,(a1)		;end of string
 
-	move.l	(sourceend-DT,a4),a0
+	move.l	(SourceEnd-DT,a4),a0
 	add.l	d4,a0
 	addq.l	#1,a0
-	move.l	a0,(Cut_Blok_End-DT,a4)
+	move.l	a0,(Cut_Buffer_End-DT,a4)
 
 
 	bsr.w	E_Fill
@@ -4900,11 +4774,11 @@ nr2AsciiFinish:
 	move.l	(sp)+,d3
 	subq.w	#1,d3
 .lopje2
-	bsr.w	Delete
+	bsr.w	E_Delete
 	dbf	d3,.lopje2
 
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
-	bsr.w	RegTab_SETALLNOTUPD
+	bsr.w	LineTab_SETALLNOTUPD
 	rts
 
 
@@ -5000,23 +4874,24 @@ RepeatReplace:
 
 ReplaceNoQuestionsAsked:
 	cmp.b	#0,(-1,a2)
-	bne.b	C2416
+	bne.b	.skip
 	sub.l	#1,(FirstLineNr-DT,a4)
-C2416:
-	bsr.w	E_PrevCharacter
-C241A:
+.skip:	bsr.w	E_PrevCharacter
+
+.search:
 	bsr.w	EDITOR_SEARCH
 	movem.l	d1/a0/a5/a6,-(sp)
-	cmp.b	#$1A,(a2)
+	cmp.b	#$1A,(a2)		; EOF
 	beq.w	C2530
 	bsr.w	EDITSCRPRINT
-	jsr	(messages_get).l
+	jsr	(IO_GetKeyMessages).l
 	btst	#SB1_REPLACE_GLOB,(SomeBits-DT,a4)
 	bne.w	C24F8
 	btst	#0,(PR_ReqLib).l
-	beq.b	C24A8
+	beq.b	.noreq
 	btst	#0,(PR_ExtReq).l
-	beq.b	C24A8
+	beq.b	.noreq
+
 	movem.l	a0-a6,-(sp)
 	lea	(Founditshould.MSG).l,a1
 	lea	(_Yes_No_Last_.MSG).l,a2
@@ -5028,39 +4903,38 @@ C241A:
 	movem.l	(sp)+,a0-a6
 	move.b	#"Y",d1
 	cmp	#1,d0
-	beq.b	C24A4
+	beq.b	.C24A4
 	move.b	#"N",d1
 	cmp	#2,d0
-	beq.b	C24A4
+	beq.b	.C24A4
 	move.b	#"L",d1
 	cmp	#3,d0
-	beq.b	C24A4
+	beq.b	.C24A4
 	move.b	#"G",d1
 	cmp	#4,d0
-	beq.b	C24A4
+	beq.b	.C24A4
 	move.b	#"X",d1
-C24A4:
+.C24A4:
 	move.b	d1,d0
-	bra.b	C24BE
+	bra.b	.C24BE
 
-C24A8:
-	lea	(ReplaceYNLG.MSG).l,a0
+.noreq:	lea	(ReplaceYNLG.MSG).l,a0
 	jsr	(printTextInMenuStrip).l
 	jsr	(GETKEYNOPRINT).l
 	and.b	#$DF,d0
-C24BE:
+.C24BE:
 	cmp.b	#"Y",d0
 	beq.b	C24F8
 	cmp.b	#"L",d0
 	beq.b	ReplaceOne
 	cmp.b	#"G",d0
-	beq.b	C24DE
+	beq.b	.C24DE
 	cmp.b	#"N",d0
 	bne.b	LeaveSearchAndReplace
 	movem.l	(sp)+,d1/a0/a5/a6
-	bra.w	C241A
+	bra.w	.search
 
-C24DE:
+.C24DE:
 	bset	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 	bset	#SB1_REPLACE_GLOB,(SomeBits-DT,a4)
 	move	#$FFFF,(SCROLLOKFLAG-DT,a4)
@@ -5075,7 +4949,7 @@ C24F8:
 
 
 C2504:
-	bsr.w	Delete
+	bsr.w	E_Delete
 C2508:
 	tst.b	(a6)+
 	bne.b	C2504
@@ -5150,7 +5024,7 @@ C25B6:
 	lea	(SourceCode-DT,a4),a6		; filtered string buffer?
 	jsr	(Filter_inputtext).l
 	movem.l	(sp)+,a0/a5/a6
-	bsr.b	EDITOR_SEARCH
+	bsr.w	EDITOR_SEARCH
 	rts
 
 SCRF_END:
@@ -5176,7 +5050,7 @@ JUMPTOLINE:
 	bsr.w	MoveDownNLines
 	bra.w	C1146
 
-.up:	bsr.w	MoveupNLines
+.up:	bsr.w	MoveUpNLines
 	bra.w	C110E
 
 .end:	rts
@@ -5191,11 +5065,39 @@ E_Jump2Marking:
 	bra.b	MAINJUMP
 
 E_Jump2PreviousLabel:
-	bsr.w	GoBack1Line
+	rts
+	move.l	(SourceStart-DT,a4),a5
+
+.loop:	cmpa.l	a2,a5
+	beq	.end			; we're at the top
+
+	bsr.w	E_Move2BegLine		; jankiness to get to prev line
+	bsr.w	E_PrevCharacter
+	bsr.w	E_Move2BegLine
+	move.b	(a2),d0
+
+	bsr.w	testwordchar		; wordchar in col1 = label
+	bne	.loop
+
+.end:	move.l	a2,a1
+	bsr.w	E_JumpToA1
 	rts
 
 E_Jump2NextLabel:
-	jsr	test_debug
+	;move.l	(FirstLinePtr-DT,a4),a0
+	rts
+.loop:	
+	bsr.w	E_ScrollDown1Line
+	cmpa.l	a3,a1			; EOF?
+	beq.s	.end
+
+	bsr.w	E_Move2BegLine
+	move.b	(a2),d0
+	bsr.w	testwordchar
+	bne.s	.loop
+
+.end:	move.l	a2,a1
+	bsr.w	E_JumpToA1
 	rts
 
 
@@ -5301,7 +5203,7 @@ E_GotoBottom:
 	lea	(Bottomoftext.MSG).l,a0
 	jsr	(printTextInMenuStrip).l
 	movem.l	d1/d2,-(sp)
-	move.l	(sourceend).l,a0
+	move.l	(SourceEnd).l,a0
 	move.l	a0,d0
 	moveq	#0,d2
 	sub.l	a3,d0
@@ -5330,7 +5232,7 @@ E_GotoTop:
 	lea	(Topoftext.MSG).l,a0
 	jsr	(printTextInMenuStrip).l
 	move.l	#1,(FirstLineNr-DT,a4)
-	move.l	(sourcestart-DT,a4),a0
+	move.l	(SourceStart-DT,a4),a0
 	move.l	a0,(FirstLinePtr-DT,a4)
 	cmp.l	a2,a0
 	beq.b	.done
@@ -5344,7 +5246,7 @@ E_GotoTop:
 
 E_100LinesUp:
 	move	#100,d1
-	bsr.w	C10AA
+	bsr.w	E_PageUpNLines
 	jmp	(new2old_stuff).l
 
 E_100LinesDown:
@@ -5357,62 +5259,63 @@ E_100LinesDown:
 
 ;;******  ASSEMBLER ROUTINE BOTH TEXT AND LINE  *********
 
-LINE_MEMASSEM:
+Line_Assemble:
 	clr.b	(B30040-DT,a4)
 	cmp.b	#$7B,(a6)
-	bne.b	.C27B0
+	bne.b	.skip
 	move.b	#1,(B30040-DT,a4)
 	addq.w	#1,a6
-.C27B0:
-	jsr	GETNUMBERAFTEROK
+
+.skip:	jsr	GETNUMBERAFTEROK
 	beq.b	.A_VALUE
 	move.l	(MEM_DIS_DUMP_PTR-DT,a4),d0
+
 .A_VALUE:
 	tst.b	(B30040-DT,a4)
-	beq.b	C27EE
+	beq.b	.start
 	cmp.b	#1,(OpperantSize-DT,a4)
-	beq.b	C27D4
+	beq.b	.skip2
 	tst	(ProcessorType-DT,a4)
-	bne.b	C27D4
+	bne.b	.skip2
 	bclr	#0,d0
-C27D4:
-	move.l	a5,-(sp)
+
+.skip2:	move.l	a5,-(sp)
 	move.l	d0,a5
 	move.l	(a5),d0
 	cmp.b	#1,(OpperantSize-DT,a4)
-	beq.b	C27EC
+	beq.b	.skip3
 	tst	(ProcessorType-DT,a4)
-	bne.b	C27EC
+	bne.b	.skip3
 	bclr	#0,d0
-C27EC:
-	move.l	(sp)+,a5
-C27EE:
-	bset	#SB3_REPORT_ERROR,(SomeBits3-DT,a4)
+.skip3:	move.l	(sp)+,a5
+
+.start:	bset	#SB3_REPORT_ERROR,(SomeBits3-DT,a4)
 	lea	(ErrorInLine,pc),a0
 	move.l	a0,(Error_Jumpback-DT,a4)
 	lea	(Asm_Table,pc),a0
 	move.l	a0,(Asm_Table_Base-DT,a4)
 	clr.l	(CURRENT_ABS_ADDRESS-DT,a4)
 	move.l	d0,(INSTRUCTION_ORG_PTR-DT,a4)
-asmLoopje:
+
+Asm_Loop:
 	move.l	(DATA_USERSTACKPTR-DT,a4),sp
 	move.l	(INSTRUCTION_ORG_PTR-DT,a4),d0
 
 	move.l	d0,(MEM_DIS_DUMP_PTR-DT,a4)
 	clr	(CurrentSection-DT,a4)
-	jsr	(Druk_af_D0).l
+	jsr	(Print_D0AndSpace).l
 	jsr	INPUTTEXT_NOTEXT
-	cmp.b	#$1B,d0
-	beq.b	.Einde_Source
+	cmp.b	#$1B,d0			; ESC
+	beq.b	.end
 	bsr.b	Assemble_cur_line
-	tst.b	d7			;AF_FINISHED
-	bpl.b	asmLoopje
-.Einde_Source:
-	jmp	CommandlineInputHandler
+	tst.b	d7			; AF_FINISHED
+	bpl.b	Asm_Loop
+
+.end:	jmp	CommandlineInputHandler
 
 ErrorInLine:
 	jsr	(Print_ErrorTxt).l
-	bra.b	asmLoopje
+	bra.b	Asm_Loop
 
 ;********************
 ;*   Assem 1 line   *
@@ -5420,29 +5323,29 @@ ErrorInLine:
 
 Assemble_cur_line:
 	lea	(CurrentAsmLine-DT,a4),a6
-	moveq	#0,d7		;pass 2
+	moveq	#0,d7			; pass 2
 	bset	#AF_MACROS_OFF,d7
 	bsr.w	NEXTSYMBOL_SPACE
 	cmp.b	#NS_ALABEL,d1
-	bne.b	einderegel
+	bne.b	.end
 
 ;---  Remove spaces  ---
 	move.l	a6,a5
-.checklopje:
-	move.b	(a6)+,d0
+
+.loop:	move.b	(a6)+,d0
 	tst.b	(Variable_base-DT,a4,d0.w)
-	bmi.b	.checklopje
+	bmi.b	.loop
 
 	subq.w	#1,a6
 	btst	#AF_LOCALFOUND,d7
-	bne.w	HandleMacroos
+	bne.w	HandleMacros
 	lea	(SourceCode-DT,a4),a3
 	move.l	(Asm_Table_Base-DT,a4),a0
 	move	#$DFDF,d4
 	moveq	#$1F,d1
 	and.b	(a3),d1
 
-	move	(a3)+,d0	;eerste 2 letters instructie
+	move	(a3)+,d0		; first 2 letters instruction
 	and	d4,d0
 
 	add.b	d1,d1
@@ -5451,13 +5354,14 @@ Assemble_cur_line:
 
 	moveq	#0,d1
 	move.b	(a6)+,d1
-	beq.b	einderegel	'eol'
+	beq.b	.end			; EOL
 	cmp.b	#';',d1
-	beq.b	einderegel
+	beq.b	.end
+
 	tst.b	(Variable_base-DT,a4,d1.w)
 	bpl.b	Errorreg
-einderegel:
-	rts
+
+.end:	rts
 
 Errorreg:
 	move.l	(MEM_DIS_DUMP_PTR-DT,a4),(INSTRUCTION_ORG_PTR-DT,a4)
@@ -5481,23 +5385,23 @@ InitLabelArea:
 	move	#64,(Label1Entry-DT,a4)
 	move	#80,(Label2Entry-DT,a4)
 	move	#2,(LabelRollValue-DT,a4)
-	bra.b	C2902
+	bra.b	.skip
 
-.upper:
-	move	#28*48*4,d2
+.upper:	move	#28*48*4,d2
 	moveq	#'A',d0
 	move	#28,(Label1Entry-DT,a4)
 	move	#48,(Label2Entry-DT,a4)
 	move	#1,(LabelRollValue-DT,a4)
-C2902:
-	lea	(ALPHA_ONE-DT,a4),a1
+
+.skip:	lea	(ALPHA_ONE-DT,a4),a1
 	lea	(ALPHA_Two,pc),a2
 	moveq	#'Z'-'A',d1
-C290C:
-	move.b	d0,(a1)+
+
+.loop:	move.b	d0,(a1)+
 	move.b	d0,(a2)+
 	addq.b	#1,d0
-	dbra	d1,C290C
+	dbra	d1,.loop
+
 	move.l	a0,a1
 	add	d2,a0
 	move.l	a0,(LPtrsEnd-DT,a4)
@@ -5508,9 +5412,10 @@ C290C:
 	moveq	#0,d1
 	lsr.w	#2,d2
 	subq.w	#1,d2
-C2932:
-	move.l	d1,(a0)+
-	dbra	d2,C2932
+
+.loop2:	move.l	d1,(a0)+
+	dbra	d2,.loop2
+
 	lea	(SPECIAL_SYMBOL_NARG-DT,a4),a0
 	move	(Label2Entry-DT,a4),d0
 	mulu	#14,d0
@@ -5530,8 +5435,33 @@ C2932:
 	move	(ScreenHight-DT,a4),(PageHeight-DT,a4)
 	rts
 
+Zap_Sections:
+	lea	SECTION_ABS_LOCATION-DT+4(a4),a0
+	lea	SECTION_ORG_ADDRESS-DT+4(a4),a1
+	lea	SECTION_TYPE_TABLE-DT+1(a4),a2
+	lea	SECTION_OLD_ORG_ADDRESS-DT+4(a4),a3
+	moveq	#0,d3
+	move	#$00FE,d4
+	moveq	#6,d2
+
+.loop:	btst	d2,(a2)
+	beq.b	.skip
+	movem.l	a0/a1,-(sp)
+	move.l	(a3),d0
+	move.l	(a0),a1
+	move.l	(4).w,a6
+	jsr	(_LVOFreeMem,a6)
+	movem.l	(sp)+,a0/a1
+
+.skip:	move.l	d3,(a0)+
+	move.l	d3,(a1)+
+	move.b	d3,(a2)+
+	move.l	d3,(a3)+
+	dbra	d4,.loop
+	rts
+
 ASSEM_RESET_SECTIONS:
-	bsr.b	C2994
+	bsr.b	Zap_Sections
 	moveq	#0,d0
 	lea	(SECTION_START_DEFINITION).l,a0
 	move.l	a0,(SectionTreePtr-DT,a4)
@@ -5542,32 +5472,7 @@ ASSEM_RESET_SECTIONS:
 	clr	(CurrentSection-DT,a4)
 	clr	(NrOfSections-DT,a4)
 	moveq	#0,d6
-	bra.b	C29D2
-
-C2994:
-	lea	SECTION_ABS_LOCATION-DT+4(a4),a0
-	lea	SECTION_ORG_ADDRESS-DT+4(a4),a1
-	lea	SECTION_TYPE_TABLE-DT+1(a4),a2
-	lea	SECTION_OLD_ORG_ADDRESS-DT+4(a4),a3
-	moveq	#0,d3
-	move	#$00FE,d4
-	moveq	#6,d2
-C29AC:
-	btst	d2,(a2)
-	beq.b	C29C4
-	movem.l	a0/a1,-(sp)
-	move.l	(a3),d0
-	move.l	(a0),a1
-	move.l	(4).w,a6
-	jsr	(_LVOFreeMem,a6)
-	movem.l	(sp)+,a0/a1
-C29C4:
-	move.l	d3,(a0)+
-	move.l	d3,(a1)+
-	move.b	d3,(a2)+
-	move.l	d3,(a3)+
-	dbra	d4,C29AC
-	rts
+	;bra.b	C29D2
 
 C29D2:
 	cmp	#$00FF,(NrOfSections-DT,a4)
@@ -5605,15 +5510,14 @@ C2A1E:
 
 ASSEM_RESTORE_OLD_SECTION:
 	move	(CurrentSection-DT,a4),d0
-	beq.b	C2A46
+	beq.b	.end
 	lea	(SECTION_ORG_ADDRESS-DT,a4),a0
 
 	lsl.w	#2,d0
 	add	d0,a0
 
 	move.l	(INSTRUCTION_ORG_PTR-DT,a4),(a0)
-C2A46:
-	rts
+.end:	rts
 
 ASSEM_INIT_SECTION_AREAS:
 	moveq	#3,d0
@@ -5628,20 +5532,20 @@ ASSEM_INIT_SECTION_AREAS:
 	lea	SECTION_OLD_ORG_ADDRESS-DT+4(a4),a5
 	move	(NrOfSections-DT,a4),d2
 	subq.w	#1,d2
-	bmi.b	C2ABA
-C2A70:
-	moveq	#3,d0
+	bmi.b	.done
+
+.loop:	moveq	#3,d0
 	add.l	(a1),d0
 	clr.l	(a1)+
 	and.l	d3,d0
 	move.l	d0,(a5)+
 	move.b	(a2)+,d4
 	and.b	#3,d4
-	beq.b	C2AB2
+	beq.b	.next
 	btst	#0,(PR_AutoAlloc).l
-	beq.b	C2AB2
+	beq.b	.next
 	tst.l	d0
-	beq.b	C2AB2
+	beq.b	.next
 	movem.l	a0/a1,-(sp)
 	moveq	#0,d1
 	bset	d4,d1
@@ -5651,15 +5555,13 @@ C2A70:
 	move.l	d0,(a0)+
 	beq.w	_ERROR_WorkspaceMemoryFull
 	bset	#6,(-1,a2)
-	bra.b	C2AB6
+	bra.b	.skip
 
-C2AB2:
-	move.l	a3,(a0)+
+.next:	move.l	a3,(a0)+
 	add.l	d0,a3
-C2AB6:
-	dbra	d2,C2A70
-C2ABA:
-	addq.w	#4,a3
+.skip:	dbra	d2,.loop
+
+.done:	addq.w	#4,a3
 	move.l	a3,(RelocStart-DT,a4)
 	move.l	a3,(RelocEnd-DT,a4)
 	cmp.l	(WORK_END-DT,a4),a3
@@ -5672,42 +5574,36 @@ com_optimize:
 	moveq	#0,d7
 	bset	#AF_OPTIMIZE,d7
 	lea	(OptionOOptimi.MSG).l,a0
-	jsr	(printthetext).l
-	move.l	(sourcestart-DT,a4),(FirstLinePtr-DT,a4)
+	jsr	(Print_Text).l
+	move.l	(SourceStart-DT,a4),(FirstLinePtr-DT,a4)
 	move.l	#1,(FirstLineNr-DT,a4)
 	bra.w	Asmbl_Optimize
 
-C2AF6:
+com_optimize_dbg:
 	moveq	#0,d7
 	bset	#AF_DEBUG1,d7
 	bra.w	Asmbl_Optimize
 
 ASSEM_SET_PREFS:
 	btst	#0,(PR_ListFile).l
-	beq.b	C2B0E
+	beq.b	.1
 	bset	#AF_LISTFILE,d7
-C2B0E:
-	btst	#0,(PR_AllErrors).l
-	beq.b	C2B1C
+.1:	btst	#0,(PR_AllErrors).l
+	beq.b	.2
 	bset	#AF_ALLERRORS,d7
-C2B1C:
-	btst	#0,(PR_Debug).l
-	beq.b	C2B2A
+.2:	btst	#0,(PR_Debug).l
+	beq.b	.3
 	bset	#AF_DEBUG1,d7
-C2B2A:
-	btst	#0,(PR_Label).l
-	beq.b	C2B38
+.3:	btst	#0,(PR_Label).l
+	beq.b	.4
 	bset	#AF_LABELCOL,d7
-C2B38:
-	btst	#0,(PR_Comment).l
-	beq.b	C2B46
+.4:	btst	#0,(PR_Comment).l
+	beq.b	.5
 	bset	#AF_SEMICOMMENT,d7
-C2B46:
-	btst	#0,(PR_Warning).l
-	beq.b	C2B54
+.5:	btst	#0,(PR_Warning).l
+	beq.b	.end
 	bset	#AF_PROCESRWARN,d7
-C2B54:
-	rts
+.end:	rts
 
 com_assemble:
 	move.b	(a6)+,d0
@@ -5732,13 +5628,18 @@ com_assemble:
 SetActiveSourcebuf:
 	move.b	(a6)+,d0
 	cmp.b	#"0",d0
-	blt.b	C2BDA
+	blt.s	.err
 	cmp.b	#"9",d0
-	bgt.b	C2BDA
+	bgt.s	.err
 	tst.l	(L2FCBA-DT,a4)
-	beq.b	C2BD8
+	beq.s	.end
 	sub.b	#"0",d0
-C2BAE:
+	bra.s	Go2Sourcebuf
+
+.end:	rts
+.err:	bra.w	_ERROR_Illegalsource
+
+Go2Sourcebuf:
 	move.b	#1,(FromCmdLine-DT,a4)
 	move.b	d0,(Change2Source-DT,a4)
 	movem.l	d0-d7/a0-a6,-(sp)
@@ -5748,11 +5649,6 @@ C2BAE:
 	move.b	#0,(FromCmdLine-DT,a4)
 	jmp	(RESETMENUTEXT2).l
 
-C2BD8:
-	rts
-
-C2BDA:
-	bra.w	_ERROR_Illegalsource
 
 ReAssemble:
 	moveq	#0,d7
@@ -5761,7 +5657,7 @@ Asmbl_Optimize:
 	move.l	#eop_irq_routine,(pcounter_base-DT,a4)
 	bclr	#SB2_INDEBUGMODE,(SomeBits2-DT,a4)
 	bclr	#SB2_MATH_XN_OK,(SomeBits2-DT,a4)
-	jsr	(DEBUG_CLEAR_BP_BUFFER).l
+	jsr	(Zap_Breakpoints).l
 
 	move.b	#0,(MMUAsmBits-DT,a4)
 	clr.l	(L2F118-DT,a4)
@@ -5773,7 +5669,7 @@ Asmbl_Optimize:
 	move	#100,(ProgressSpeed-DT,a4)
 	move	#100,(ProgressCntr-DT,a4)
 	lea	(ProgramName).l,a0
-	move.l	($0106,a0),(a0)		;default prog name
+	move.l	($0106,a0),(a0)		; default prog name
 	move	($010A,a0),(4,a0)	; ''
 	lea	(HPass1.MSG).l,a0
 	jsr	(beeldtextaf).l
@@ -5782,14 +5678,14 @@ Asmbl_Optimize:
 	bsr.w	ASSEM_RESET_SECTIONS
 	bsr.w	ASSEMBLERAWFILE
 	btst	#AF_BRATOLONG,d7
-	beq.b	C2C5C
+	beq.b	.C2C5C
 	jmp	(C11CF8).l
 
-C2C5C:
+.C2C5C:
 	tst	(NrOfErrors-DT,a4)
-	bne.b	C2CAE
+	bne.b	.C2CAE
 	cmp.b	#1,(B30176-DT,a4)
-	beq.b	C2CC6
+	beq.b	.C2CC6
 	bsr.w	ASSEM_RESTORE_OLD_SECTION
 	move.l	(LabelEnd-DT,a4),(DEBUG_END-DT,a4)
 	btst	#AF_DEBUG1,d7
@@ -5806,47 +5702,47 @@ C2C5C:
 
 	movem.l	d0/a0,-(sp)
 	lea	(ERROR_AddressRegByte).l,a0
-	move.l	#shit_deel-ERROR_AddressRegByte,d0
+	move.l	#.shit_deel-ERROR_AddressRegByte,d0
 	lea	(a0,d0.l),a0
 	jmp	(a0)
 
 ;	jmp	shit_deel
 
-C2CAE:
+.C2CAE:
 	moveq	#0,d7
 	move	(NrOfErrors-DT,a4),d0
-	jsr	(DrukAf_LineNrPrint).l
-	jsr	Druk_Clearbuffer
+	jsr	(Print_LineNumber).l
+	jsr	Print_ClearBuffer
 	lea	(HErrorsOccure.MSG).l,a0
-	jmp	(printthetext).l
+	jmp	(Print_Text).l
 
-C2CC6:
+.C2CC6:
 	moveq	#0,d7
 	move	(NrOfErrors-DT,a4),d0
-	jsr	(DrukAf_LineNrPrint).l
-	jsr	Druk_Clearbuffer
+	jsr	(Print_LineNumber).l
+	jsr	Print_ClearBuffer
 	lea	(HSourcechecke.MSG).l,a0
-	jmp	(printthetext).l
+	jmp	(Print_Text).l
 
-shit_deel:
+.shit_deel:
 	movem.l	(sp)+,d0/a0
 	lea	(HPass2.MSG).l,a0
 	jsr	(beeldtextaf).l
 	bsr.w	ASSEMBLERAWFILE
 	btst	#AF_BRATOLONG,d7
-	beq.b	C2CFE
+	beq.b	.C2CFE
 	jmp	(C11CF8).l
 
-C2CFE:
+.C2CFE:
 	tst	(NrOfErrors-DT,a4)
-	bne.b	C2CAE
+	bne.b	.C2CAE
 	moveq.l	#0,d3
 	bsr.w	ASSEM_RESTORE_OLD_SECTION
 	bsr.b	.SetCodeStart
 	move.l	(RelocStart-DT,a4),a0
 	move.l	#$12345678,-(a0)
 	lea	(HNoErrors.MSG).l,a0
-	jsr	(printthetext).l
+	jsr	(Print_Text).l
 	jsr	(PRINT_SYMBOLTABELMAYBE).l
 	move	#2,(AssmblrStatus).l
 	moveq	#0,d7
@@ -5887,9 +5783,9 @@ ASSEMBLERAWFILE:
 	moveq	#0,d0
 	move.b	d0,(BASEREG_BYTE-DT,a4)
 	move.l	d0,(DATA_CURRENTLINE-DT,a4)
-	move.l	(sourcestart-DT,a4),a6
+	move.l	(SourceStart-DT,a4),a6
 	move.l	sp,(TEMP_STACKPTR-DT,a4)
-	lea	(.loopje,pc),a0
+	lea	(.loop,pc),a0
 	move.l	a0,(TEMP_CONT_PTR-DT,a4)
 	move	d0,(INCLUDE_LEVEL-DT,a4)
 	move	d0,(MACRO_LEVEL-DT,a4)
@@ -5901,19 +5797,19 @@ ASSEMBLERAWFILE:
 	move	d0,(PageLinesLeft-DT,a4)
 	move	d0,(PageNumber-DT,a4)
 	move.l	d0,(RS_BASE_OFFSET-DT,a4)
-.loopje:
-	addq.l	#1,(DATA_CURRENTLINE-DT,a4)
+
+.loop:	addq.l	#1,(DATA_CURRENTLINE-DT,a4)
 	tst.b	(DATA_CURRENTLINE+3-DT,a4)	;was +1
-	bne.b	.DONTPRINT
-	jsr	(messages_get).l
-.DONTPRINT:
-	move.l	a6,(DATA_LINE_START_PTR-DT,a4)
-	cmp.b	#$1A,(a6)	;EOF
-	beq.b	.ENDOFPASS
+	bne.b	.skip
+	jsr	(IO_GetKeyMessages).l
+
+.skip:	move.l	a6,(DATA_LINE_START_PTR-DT,a4)
+	cmp.b	#$1A,(a6)		; EOF
+	beq.b	.end
 	btst	#AF_DEBUG1,d7
-	beq.b	.C2DFA
-	tst	d7		;AF_PASSONE
-	bmi.b	.C2DFA
+	beq.b	.skip2
+	tst	d7			; AF_PASSONE
+	bmi.b	.skip2
 ;	moveq	#0,d0
 	move.l	(DATA_CURRENTLINE-DT,a4),d0
 	subq.l	#1,d0
@@ -5923,18 +5819,18 @@ ASSEMBLERAWFILE:
 	move.l	(INSTRUCTION_ORG_PTR-DT,a4),d0
 	add.l	(CURRENT_ABS_ADDRESS-DT,a4),d0
 	move.l	d0,(a0)
-.C2DFA:
-	bsr.w	FAST_TRANSLATE_LINE
+
+.skip2:	bsr.w	FAST_TRANSLATE_LINE
 	btst	#AF_LISTFILE,d7
-	beq.b	.C2E0E
-	tst	d7		;AF_DEBUG1
-	bmi.b	.C2E0E
+	beq.b	.next
+	tst	d7			; AF_DEBUG1
+	bmi.b	.next
 	jsr	(PRINT_ASSEMBLING).l
-.C2E0E:
-	tst.b	d7		;AF_FINISHED
-	bpl.b	.loopje
-.ENDOFPASS:
-	tst	(REPT_LEVEL-DT,a4)
+
+.next:	tst.b	d7			; AF_FINISHED
+	bpl.b	.loop
+
+.end:	tst	(REPT_LEVEL-DT,a4)
 	bne.w	_ERROR_UnexpectedEOF
 	rts
 
@@ -5954,13 +5850,13 @@ ASSEM_MACROFOUND:
 	move	(MACRO_LOCALNR-DT,a4),d5
 	addq.w	#1,d5
 	move	d5,(MACRO_LOCALNR-DT,a4)
-.Loopje:
-	bsr.w	C366E
+
+.loop:	bsr.w	C366E
 	movem.l	d5/a2/a5,-(sp)
 	bsr.w	FAST_TRANSLATE_LINE
 	movem.l	(sp)+,d5/a2/a5
 	btst	#AF_MACRO_END,d7
-	beq.b	.Loopje
+	beq.b	.loop
 	bclr	#AF_MACRO_END,d7
 	move.l	(sp)+,a6
 	clr.b	(a6)
@@ -5968,15 +5864,15 @@ ASSEM_MACROFOUND:
 	move.l	a2,(CURRENT_MACRO_ARG_PTR-DT,a4)
 	subq.w	#1,(MACRO_LEVEL-DT,a4)
 	cmp	(MACRO_LOCALNR-DT,a4),d5
-	bne.b	.End
+	bne.b	.end
 	tst.l	d5
-	bmi.b	.End
+	bmi.b	.end
 	subq.w	#1,d5
 	move	d5,(MACRO_LOCALNR-DT,a4)
-.End:
-	rts
 
-ascii.MSG84:
+.end:	rts
+
+PercentDigits.MSG:
 	dc.b	' 000'
 Complete.MSG:
 	dc.b	'% Complete',$D,0
@@ -5986,63 +5882,61 @@ Line.MSG:
 
 ShowAsmProgress:
 	btst	#0,(PR_Progress).l
-	beq.w	No_Processindicator
+	beq.s	.exit
 	btst	#0,(PR_ProgressLine).l
-	beq.b	Process_indicatorByPerc
+	beq.s	Process_indicatorByPerc
 
 	movem.l	d0-d7/a0-a6,-(sp)
 ;	moveq	#0,d0
 	move.l	(DATA_CURRENTLINE-DT,a4),d0
 	tst.b	d0
-	bne.b	C2ED0
+	bne.b	.end
 
 	lea	(Line.MSG,pc),a0
 	jsr	(beeldtextaf).l
 
 	lea	Line.MSG+10,a0
 	moveq.l	#5-1,d7
-.lopje:
-	divu.w	#10,d0
+
+.loop:	divu.w	#10,d0
 	swap	d0
 	tst.l	d0
-	bne.s	.nomask
+	bne.s	.skip
 	moveq.l	#' '-'0',d0
-.nomask:
-	add.b	#'0',d0
+
+.skip:	add.b	#'0',d0
 	move.b	d0,-(a0)
 	clr.w	d0
 	swap	d0
-	dbf	d7,.lopje
+	dbf	d7,.loop
 
-C2ED0:
-	movem.l	(sp)+,d0-d7/a0-a6
-	rts
+.end:	movem.l	(sp)+,d0-d7/a0-a6
+.exit:	rts
 
 Process_indicatorByPerc:
 	subq.w	#1,(ProgressCntr-DT,a4)
-	bne.w	No_Processindicator
+	bne.w	.exit
 	move	(ProgressSpeed-DT,a4),(ProgressCntr-DT,a4)
 
 	movem.l	d0/d1/d2/a0,-(sp)
 	move.l	a6,d0
-	cmp.l	(sourceend-DT,a4),d0
-	bhi.w	C2F6E
-	cmp.l	(sourcestart-DT,a4),d0
-	bcs.w	C2F6E
-	sub.l	(sourcestart-DT,a4),d0
-	move.l	(sourceend-DT,a4),d1
-	sub.l	(sourcestart-DT,a4),d1
-C2F02:
-	swap	d1
+	cmp.l	(SourceEnd-DT,a4),d0
+	bhi.w	.end
+	cmp.l	(SourceStart-DT,a4),d0
+	bcs.w	.end
+	sub.l	(SourceStart-DT,a4),d0
+	move.l	(SourceEnd-DT,a4),d1
+	sub.l	(SourceStart-DT,a4),d1
+
+.loop:	swap	d1
 	tst	d1
-	beq.b	C2F10
+	beq.b	.done
 	swap	d1
 	lsr.l	#4,d0
 	lsr.l	#4,d1
-	bra.b	C2F02
+	bra.b	.loop
 
-C2F10:
-	swap	d1
+.done:	swap	d1
 	addq.w	#1,d1
 
 	lsl.l	#2,d0
@@ -6051,16 +5945,15 @@ C2F10:
 	add.l	d0,d2
 	lsl.l	#4,d0
 	add.l	d2,d0
-;	mulu	#100,d0
 
 	tst	d1
-	bne.b	C2F1E
+	bne.b	.skip
 	addq.w	#1,d1
-C2F1E:
-	divu	d1,d0
+
+.skip:	divu	d1,d0
 	and.l	#$0000007F,d0
 	cmp	(W2E4CC-DT,a4),d0
-	beq.b	C2F6E
+	beq.b	.end
 	lea	(Complete.MSG,pc),a0
 	move	d0,(W2E4CC-DT,a4)
 	divu	#10,d0
@@ -6080,12 +5973,11 @@ C2F1E:
 	add.b	#'0',d0
 	move.b	d0,-(a0)
 	moveq	#0,d0
-	lea	(ascii.MSG84).l,a0
+	lea	(PercentDigits.MSG).l,a0
 	jsr	(beeldtextaf).l
-C2F6E:
-	movem.l	(sp)+,d0/d1/d2/a0
-No_Processindicator:
-	rts
+
+.end:	movem.l	(sp)+,d0/d1/d2/a0
+.exit:	rts
 
 FAST_TRANSLATE_LINE:
 	bsr.w	ShowAsmProgress
@@ -6100,7 +5992,7 @@ FAST_TRANSLATE_LINE:
 	jmp	(W02F98,pc,d1.w)
 
 W02F98:
-	dr.w	asm_einderegel
+	dr.w	TR_EOL
 	dr.w	TR_EmptyChar
 	dr.w	TR_EmptyChar
 	dr.w	TR_EmptyChar
@@ -6234,49 +6126,49 @@ W02F98:
 	lea	(SourceCode-DT,a4),a1
 	move.b	(a6)+,d0
 	move.b	(Variable_base-DT,a4,d0.w),(a1)+
-	bgt.b	C30B8
+	bgt.b	.C30B8
 	bra.w	_ERROR_IllegalOperatorInBSS
 
 .TR_Global3:
 	bclr	#AF_LOCALFOUND,d7
 	lea	(SourceCode-DT,a4),a1
 	move.b	(Variable_base-DT,a4,d0.w),(a1)+
-C30B8:
+.C30B8:
 	move.b	(a6)+,d0
 	move.b	(Variable_base-DT,a4,d0.w),(a1)+
-	ble.b	C30D0
+	ble.b	.C30D0
 	move.b	(a6)+,d0
 	move.b	(Variable_base-DT,a4,d0.w),(a1)+
-	bgt.b	C30B8
+	bgt.b	.C30B8
 	subq.w	#3,a1
 	or.w	#$8000,(a1)
-	bra.b	C30DA
+	bra.b	.C30DA
 
-C30D0:
+.C30D0:
 	move	#$8000,d1
 	add	-(a1),d1
 	clr.b	d1
 	move	d1,(a1)
-C30DA:
+.C30DA:
 	cmp.b	#":",d0
 	beq.b	C311A
 	cmp.b	#"$",d0
-	bne.b	C30FE
+	bne.b	.C30FE
 	bset	#AF_LOCALFOUND,d7
 	move.b	(a6)+,d0
 	cmp.b	#":",d0
 	beq.b	C311A
 	tst.b	(Variable_base-DT,a4,d0.w)
-	ble.b	C30FE
+	ble.b	.C30FE
 	bra.w	_ERROR_IllegalOperatorInBSS
 
-C30FE:
+.C30FE:
 	subq.l	#1,a6
 	move.l	a6,a5
-C3102:
+.C3102:
 	move.b	(a6)+,d0
 	tst.b	(Variable_base-DT,a4,d0.w)
-	bmi.b	C3102
+	bmi.b	.C3102
 	cmp.b	#"=",d0
 	beq.b	C3138
 	btst	#AF_LABELCOL,d7
@@ -6298,19 +6190,19 @@ C3122:
 	jmp	(TransLableTab,pc,d1.w)
 
 C3138:
-	tst.l	d7		;AF_IF_FALSE
+	tst.l	d7			; AF_IF_FALSE
 	bmi.w	TR_2EOL
-C313E:
-	move.b	(a6)+,d0
+
+.loop:	move.b	(a6)+,d0
 	tst.b	(Variable_base-DT,a4,d0.w)
-	bmi.b	C313E
+	bmi.b	.loop
 	subq.w	#1,a6
 	bsr.w	MAKELABEL_NOTSET
 	jsr	(Asm_EQU).l
 	br.w	FindEndOfLine
 
 TransLableTab:
-	dr.w	asm_einderegel		;0
+	dr.w	TR_EOL		;0
 	dr.w	TR_EmptyChar	;1
 	dr.w	TR_EmptyChar	;2
 	dr.w	TR_EmptyChar	;3
@@ -6482,12 +6374,8 @@ FastACommand:
 C32A4:
 	subq.l	#1,a6
 	btst	#AF_LOCALFOUND,d7
-	bne.w	HandleMacroos
+	bne.w	HandleMacros
 	lea	(SourceCode-DT,a4),a3
-
-;	move.l	(a3),d0
-;	jsr	test_debug
-;	jsr	test1
 
 	move.l	(Asm_Table_Base-DT,a4),a0
 	move	#$DFDF,d4
@@ -6503,26 +6391,24 @@ C32A4:
 FindEndOfLine:
 	moveq	#0,d1
 	move.b	(a6)+,d1
-	beq.b	asm_einderegel
+	beq.b	TR_EOL
 	cmp.b	#';',d1
 	beq.b	TR_2EOL
 	cmp.b	#'*',d1
 	beq.b	TR_2EOL
 	tst.b	(Variable_base-DT,a4,d1.w)
-	bmi.b	C32E8
-;		jsr	test_debug
-
+	bmi.b	.ok
 	jmp	(ERROR_IllegalOperand).l
 
-C32E8:
-	btst	#AF_SEMICOMMENT,d7
+.ok:	btst	#AF_SEMICOMMENT,d7
 	beq.b	TR_2EOL
-C32EE:
-	move.b	(a6)+,d1
+
+.loop:	move.b	(a6)+,d1
 	tst.b	(Variable_base-DT,a4,d1.w)
-	bmi.b	C32EE
+	bmi.b	.loop
+
 	tst.b	d1
-	beq.b	asm_einderegel
+	beq.b	TR_EOL
 	cmp.b	#';',d1
 	beq.b	TR_2EOL
 	cmp.b	#'*',d1
@@ -6532,11 +6418,11 @@ C32EE:
 TR_2EOL:
 	tst.b	(a6)+
 	bne.b	TR_2EOL
-asm_einderegel:
-	tst	d7		;AF_PASSONE
-	bmi.b	.pass1
+TR_EOL:
+	tst	d7			; AF_PASSONE
+	bmi.b	.end
 	move.l	(LAST_LABEL_ADDRESS-DT,a4),d0
-	beq.b	.pass1
+	beq.b	.end
 	move.l	d0,a1
 	move.l	(ResponsePtr-DT,a4),d0
 	cmp.l	-(a1),d0
@@ -6544,11 +6430,10 @@ asm_einderegel:
 	move	-(a1),d0
 	bclr	#14,d0
 	cmp	(ResponseType-DT,a4),d0
-	beq.b	.pass1
+	beq.b	.end
 	br.w	_ERROR_Codemovedduring
 
-.pass1:
-	rts
+.end:	rts
 
 m68_ChangeCpuType:
 	moveq.l	#0,d1
@@ -6558,25 +6443,24 @@ m68_ChangeCpuType:
 	lsl.w	#8,d1
 	and.l	#$dfdfdf00,d1
 
-HandleMacroos:
+HandleMacros:
 	addq.l	#4,sp
 	btst	#AF_MACROS_OFF,d7
 	bne.w	_ERROR_IllegalOperatorInBSS
-	tst.l	d7		;AF_IF_FALSE
+	tst.l	d7			; AF_IF_FALSE
 	bmi.w	TR_2EOL
-	bsr.w	Zoek_uit_extentie
-	beq.b	C334E
+	bsr.w	search_from_extension
+	beq.b	.err
 	tst	d2
-	bmi.b	C335A
-C334E:
-	btst	#AF_BSS_AREA,d7
+	bmi.b	.ok
+
+.err:	btst	#AF_BSS_AREA,d7
 	bne.w	_ERROR_IllegalOperator
 	br.w	_ERROR_IllegalOperatorInBSS
 
-C335A:
-	swap	d2
+.ok:	swap	d2
 	and.b	#"?",d2
-	bne.b	C334E
+	bne.b	.err
 	bsr.w	ASSEM_MACROFOUND
 	bra.w	TR_2EOL
 
@@ -6584,11 +6468,11 @@ TR_WS:
 	move.b	(a6)+,d0
 	move	d0,d1
 	add.b	d1,d1
-	add	(W3376,pc,d1.w),d1
-	jmp	(W3376,pc,d1.w)
+	add	(TR_WSTable,pc,d1.w),d1
+	jmp	(TR_WSTable,pc,d1.w)
 
-W3376:
-	dr.w	asm_einderegel	;0
+TR_WSTable:
+	dr.w	TR_EOL		;0
 	dr.w	TR_EmptyChar
 	dr.w	TR_EmptyChar
 	dr.w	TR_EmptyChar
@@ -6722,30 +6606,30 @@ W3376:
 	lea	(SourceCode-DT,a4),a1
 	move.b	(a6)+,d0
 	move.b	(Variable_base-DT,a4,d0.w),(a1)+
-	bgt.b	C3496
+	bgt.b	.C3496
 	br.w	_ERROR_IllegalOperatorInBSS
 
 .TR_Global:
 	bclr	#AF_LOCALFOUND,d7
 	lea	(SourceCode-DT,a4),a1
 	move.b	(Variable_base-DT,a4,d0.w),(a1)+
-C3496:
+.C3496:
 	move.b	(a6)+,d0
 	move.b	(Variable_base-DT,a4,d0.w),(a1)+
-	ble.b	C34AE
+	ble.b	.C34AE
 	move.b	(a6)+,d0
 	move.b	(Variable_base-DT,a4,d0.w),(a1)+
-	bgt.b	C3496
+	bgt.b	.C3496
 	subq.w	#3,a1
 	or.w	#$8000,(a1)
-	bra.b	C34B8
+	bra.b	.C34B8
 
-C34AE:
+.C34AE:
 	move	#$8000,d1
 	add	-(a1),d1
 	clr.b	d1
 	move	d1,(a1)
-C34B8:
+.C34B8:
 	cmp.b	#":",d0
 	beq.w	C311A
 	cmp.b	#"=",d0
@@ -6761,72 +6645,72 @@ FilterText:
 	lea	(FilterTable,pc),a1
 	moveq	#$13,d1
 	moveq	#0,d0
-C34DE:
+.C34DE:
 	subq.w	#1,d1
-	bmi.b	C354C
-C34E2:
+	bmi.b	.C354C
+.C34E2:
 	move.b	(a6)+,d0
 	tst.b	(Variable_base-DT,a4,d0.w)
-	bmi.b	C34E2
+	bmi.b	.C34E2
 	move.b	(a1,d0.w),(a0)+
-	bne.b	C3510
+	bne.b	.C3510
 	cmp.b	#",",d0
-	beq.b	C34DE
+	beq.b	.C34DE
 	tst.b	d0
-	beq.b	C354A
+	beq.b	.C354A
 	cmp.b	#"'",d0
-	beq.b	C3536
+	beq.b	.C3536
 	cmp.b	#'"',d0
-	beq.b	C3536
+	beq.b	.C3536
 	cmp.b	#"`",d0
-	beq.b	C3536
-	bra.b	C354A
+	beq.b	.C3536
+	bra.b	.C354A
 
-C3510:
+.C3510:
 	move.b	(a6)+,d0
 	move.b	(a1,d0.w),(a0)+
-	bne.b	C3510
+	bne.b	.C3510
 	cmp.b	#",",d0
-	beq.b	C34DE
+	beq.b	.C34DE
 	tst.b	d0
-	beq.b	C354E
+	beq.b	.C354E
 	cmp.b	#"'",d0
-	beq.b	C3536
+	beq.b	.C3536
 	cmp.b	#'"',d0
-	beq.b	C3536
+	beq.b	.C3536
 	cmp.b	#"`",d0
-	bne.b	C354E
-C3536:
+	bne.b	.C354E
+.C3536:
 	move.b	d0,d2
 	subq.w	#1,a0
-C353A:
+.C353A:
 	move.b	d0,(a0)+
 	move.b	(a6)+,d0
 	beq.w	_ERROR_MissingQuote
 	cmp.b	d0,d2
-	bne.b	C353A
+	bne.b	.C353A
 	move.b	d2,(a0)+
-	bra.b	C3510
+	bra.b	.C3510
 
-C354A:
+.C354A:
 	subq.w	#1,a0
-C354C:
+.C354C:
 	addq.w	#1,d1
-C354E:
+.C354E:
 	move	d1,d0
-	bra.b	C3554
+	bra.b	.C3554
 
-C3552:
+.C3552:
 	clr.b	(a0)+
-C3554:
-	dbra	d0,C3552
+.C3554:
+	dbra	d0,.C3552
 	moveq	#$13,d0
 	sub	d1,d0
 	move	d0,(MACRO_ARGUMENTS-DT,a4)
 	subq.w	#1,a6
-C3562:
+.C3562:
 	tst.b	(a6)+
-	bne.b	C3562
+	bne.b	.C3562
 	subq.w	#1,a6
 	move.l	a0,(CURRENT_MACRO_ARG_PTR-DT,a4)
 	rts
@@ -6901,83 +6785,83 @@ C366E:
 	lea	(MACRO_LINEBUFFER-DT,a4),a3
 	move.l	a3,a6
 	moveq	#$5C,d1
-C3676:
+.C3676:
 	move.b	(a5)+,d0
-	beq.b	C3676
+	beq.b	.C3676
 	cmp.b	#"*",d0
-	beq.w	C374C
+	beq.w	.C374C
 	cmp.b	#$1A,d0
 	beq.w	_ERROR_UnexpectedEOF
 	cmp.b	d1,d0
-	beq.b	C369A
-C368E:
+	beq.b	.C369A
+.C368E:
 	move.b	d0,(a3)+
-C3690:
+.C3690:
 	move.b	(a5)+,d0
-	beq.w	C3750
+	beq.w	.C3750
 	cmp.b	d1,d0
-	bne.b	C368E
-C369A:
+	bne.b	.C368E
+.C369A:
 	moveq	#0,d0
 	move.b	(a5)+,d0
 	cmp.b	#"0",d0
-	beq.b	C36F8
+	beq.b	.C36F8
 	cmp.b	#"@",d0
-	beq.b	C3714
+	beq.b	.C3714
 	cmp.b	#".",d0
-	beq.b	C36EE
+	beq.b	.C36EE
 	cmp.b	d1,d0
-	beq.b	C368E
+	beq.b	.C368E
 	sub.b	#"1",d0
 	cmp.b	#9,d0
 	bcc.w	_ERROR_IllegalOperand
 	tst.b	d0
-	bne.b	C36D8
+	bne.b	.C36D8
 	move.b	(a5),d3
 	sub.b	#"0",d3
 	cmp.b	#9,d3
-	bhi.b	C36D8
+	bhi.b	.C36D8
 	moveq	#9,d0
 	add.b	d3,d0
 	addq.w	#1,a5
-C36D8:
+.C36D8:
 	move.l	a2,a0
 	subq.b	#1,d0
-	bmi.b	C36E6
-C36DE:
+	bmi.b	.C36E6
+.C36DE:
 	tst.b	(a0)+
-	bne.b	C36DE
-	dbra	d0,C36DE
-C36E6:
+	bne.b	.C36DE
+	dbra	d0,.C36DE
+.C36E6:
 	move.b	(a0)+,(a3)+
-	bne.b	C36E6
+	bne.b	.C36E6
 	subq.w	#1,a3
-	bra.b	C3690
+	bra.b	.C3690
 
-C36EE:
+.C36EE:
 	move.b	#"\",(a3)+
 	move.b	#".",(a3)+
-	bra.b	C3690
+	bra.b	.C3690
 
-C36F8:
+.C36F8:
 	moveq	#0,d0
 	move.b	(B30177-DT,a4),d0
-	bpl.b	C3704
+	bpl.b	.C3704
 	clr.b	-(a3)
-	bra.b	C3690
+	bra.b	.C3690
 
-C3704:
-	move.b	(B0370C,pc,d0.w),(a3)+
-	br.b	C3690
+.C3704:
+	move.b	(.B0370C,pc,d0.w),(a3)+
+	br.b	.C3690
 
-B0370C:
+.B0370C:
 	dc.b	"SBWLDXP",0
 
-C3714:
+.C3714:
 	bset	#$1F,d5
 	move.b	#$5F,(a3)+
 	move	d5,d0
-	lea	(ABCDEF.MSG,pc),a0
+	lea	(HexChars.MSG,pc),a0
 	moveq	#15,d2
 	and.b	d0,d2
 	move.b	(a0,d2.w),(a3)+
@@ -6993,23 +6877,23 @@ C3714:
 	moveq	#15,d2
 	and.b	d0,d2
 	move.b	(a0,d2.w),(a3)+
-	br.w	C3690
+	br.w	.C3690
 
-C374C:
+.C374C:
 	move.b	(a5)+,d0
-	bne.b	C374C
-C3750:
+	bne.b	.C374C
+.C3750:
 	move.b	d0,(a3)+
 	rts
 
-ABCDEF.MSG:
+HexChars.MSG:
 	dc.b	'0123456789ABCDEF'
 
 RemoveWS:
 	move.b	(a6)+,d0
 	cmp.b	#" ",d0
 	beq.b	RemoveWS
-	cmp.b	#9,d0
+	cmp.b	#9,d0			; TAB
 	beq.b	RemoveWS
 	tst.b	d0
 	rts
@@ -7017,41 +6901,35 @@ RemoveWS:
 C3778:
 	jsr	(Parse_GetExprValueInD3Voor).l
 	btst	#AF_UNDEFVALUE,d7
-	bne.b	C3798
+	bne.b	.end
 	cmp	(CurrentSection-DT,a4),d2
-	beq.b	C3792
+	beq.b	.ok
 	tst	d2
-	bmi.b	C3798
+	bmi.b	.end
 	br.w	_ERROR_RelativeModeEr
 
-C3792:
-	moveq	#0,d2
+.ok:	moveq	#0,d2
 	sub.l	(Binary_Offset-DT,a4),d3
-C3798:
-	rts
+.end:	rts
 
 C379A:
 	jsr	(Parse_GetExprValueInD3Voor).l
 	btst	#AF_UNDEFVALUE,d7
-	beq.b	C37AC
+	beq.b	.skip
 	jmp	(C755A).l
 
-C37AC:
-	moveq	#0,d2
+.skip:	moveq	#0,d2
 	sub.l	(Binary_Offset-DT,a4),d3
 	jmp	(Store_DataLongReloc).l
 
-C37D8:
 	tst	d3
-	bne.b	C37E2
+	bne.b	.end
 	jmp	(C106EC).l
 
-C37E2:
-	sub.l	(Binary_Offset-DT,a4),d3
+.end:	sub.l	(Binary_Offset-DT,a4),d3
 	jmp	(Store_DataLongReloc).l
-
-C37EC:
 	rts
+
 
 C37EE:
 	jsr	(Parse_GetExprValueInD3Voor).l
@@ -7695,7 +7573,6 @@ Parse_HaakjeOpenVoor:
 	cmp.b	#']',(a6)		; ([xxx]
 	bne.b	.verder
 
-;		jsr	test_debug
 ;	clr.w	(Parse_AdrValueSize-DT,a4)
 
 	move	#$00f0,d3		;wierd stuff!!
@@ -8234,7 +8111,6 @@ Parse_DisplacementAdrOrAreg:
 ;	bmi.s	.nochange
 ;	cmp.w	#$171,d3
 ;	bne.s	.nochange
-;	jsr	test_debug
 ;	sub.l	#8,(Parse_AdrValue-DT,a4)
 ;.nochange:
 
@@ -9435,12 +9311,12 @@ MAKELABEL_NOTSET:
 	bsr	Parse_CheckIfReservedWord
 ;	bne	_C00CCE2
 	bne	_ERROR_ReservedWord
-	bsr	FINDLABEL_GLOBAL
+	bsr	Parse_FindLabelGlobal
 	beq.b	LABEL_CONTINUE_GLOBAL
 	jmp	ERROR_DoubleSymbol
 
 .pass2:
-	bsr	FINDLABEL_GLOBAL
+	bsr	Parse_FindLabelGlobal
 ;	beq	_C00CCF6
 	beq	_ERROR_UndefSymbol
 	move.l	a0,(CurrentLocalPtr-DT,a4)
@@ -9460,7 +9336,7 @@ MAKELABEL:
 	bsr	Parse_CheckIfReservedWord
 ;	bne	_C00CCE2
 	bne	_ERROR_ReservedWord
-	bsr	FINDLABEL_GLOBAL
+	bsr	Parse_FindLabelGlobal
 	bne.b	LABEL_CHECK_IF_SET
 LABEL_CONTINUE_GLOBAL:
 	lea	(GeenIdee-DT,a4),a1
@@ -9489,7 +9365,7 @@ LABEL_THEEND:
 	rts
 
 LABEL_PASSTWO:
-	bsr	FINDLABEL_GLOBAL
+	bsr	Parse_FindLabelGlobal
 	beq	_ERROR_UndefSymbol
 	bchg	#14,(-6,a0)
 	bne.b	LABEL_CHECK_IF_SET
@@ -9503,7 +9379,6 @@ LABEL_CHECK_IF_SET:
 	move.l	a0,(LAST_LABEL_ADDRESS-DT,a4)
 	swap	d2
 
-;		jsr	test_debug
 	and.b	#$3F,d2		; MACRO = $8000
 	subq.b	#1,d2
 	bne	ERROR_DoubleSymbol
@@ -9558,12 +9433,12 @@ C4E50:
 MAKELABEL_LOCAL_NOTSET:
 	tst	d7	;passone
 	bpl.b	C4EBE
-	bsr	Parse_FindlabelLocal
+	bsr	Parse_FindLabelLocal
 	beq.b	C4EE2
 	br	ERROR_DoubleSymbol
 
 C4EBE:
-	bsr	Parse_FindlabelLocal
+	bsr	Parse_FindLabelLocal
 	beq	ERROR_UndefSymbol
 	move.l	a0,(LAST_LABEL_ADDRESS-DT,a4)
 	bchg	#14,(-6,a0)
@@ -9573,7 +9448,7 @@ C4EBE:
 C4ED6:
 	tst	d7	;passone
 	bpl.b	C4F1A
-	bsr	Parse_FindlabelLocal
+	bsr	Parse_FindLabelLocal
 	bne	LABEL_CHECK_IF_SET
 C4EE2:
 	lea	(SourceCode-DT,a4),a1
@@ -9596,7 +9471,7 @@ C4EFA:
 	jmp	(CE258).l
 
 C4F1A:
-	bsr	Parse_FindlabelLocal
+	bsr	Parse_FindLabelLocal
 	beq	ERROR_UndefSymbol
 	bchg	#14,(-6,a0)
 	bne	LABEL_CHECK_IF_SET
@@ -9628,7 +9503,7 @@ C4F62:
 	bpl.b	C4FAC
 	bsr	Parse_CheckIfReservedWord
 	bne	ERROR_ReservedWord
-	bsr	FINDLABEL_GLOBAL
+	bsr	Parse_FindLabelGlobal
 	bne	ERROR_DoubleSymbol
 	lea	(SourceCode-DT,a4),a1
 	addq.w	#1,(DATA_NUMOFGLABELS-DT,a4)
@@ -9684,102 +9559,96 @@ C4FE0:
 	beq.b	C4FD6
 	br	ERROR_Codemovedduring
 
-Parse_FindlabelLocal:
+Parse_FindLabelLocal:
 	lea	(SourceCode-DT,a4),a3
 	move.l	(CurrentLocalPtr-DT,a4),d0
 	beq	ERROR_Notlocalarea
 	move.l	d0,a2
 	br	Parse_FindlabelNoSupertree
 
-Zoek_uit_extentie:
+search_from_extension:
 	movem.l	d0/a3,-(sp)
 	lea	(SourceCode-DT,a4),a3
-C500E:
-	move	(a3)+,d0
-	bpl.b	C500E
+
+.loop:	move	(a3)+,d0
+	bpl.b	.loop
+
 	move	(-2,a3),d0
 	tst.b	d0
-	bne.b	C5020
+	bne.b	.skip
 	move.b	(-3,a3),d0
 	ror.w	#8,d0
 
-C5020:
-	and	#$7F7F,d0
+.skip:	and	#$7F7F,d0
 	bclr	#5,d0
 	cmp	#$4042,d0	;.B
-	beq.b	C5068
+	beq.b	.b
 	cmp	#$4057,d0	;.W
-	beq.b	C5070
+	beq.b	.w
 	cmp	#$404C,d0	;.L
-	beq.b	C5078
+	beq.b	.l
 	cmp	#$4053,d0	;.S
-	beq.b	C5060
+	beq.b	.s
 	cmp	#$4044,d0	;.D
-	beq.b	C5080
+	beq.b	.d
 	cmp	#$4058,d0	;.X
-	beq.b	C5088
+	beq.b	.x
 	cmp	#$4050,d0	;.P
-	beq.b	C5090
+	beq.b	.p
 	movem.l	(sp)+,d0/a3
 	st	(B30177-DT,a4)
-C505A:
-	bsr	Parse_FindLabel
+
+.lbl:	bsr	Parse_FindLabel
 	rts
 
-C5060:
-	move.b	#0,(B30177-DT,a4)
-	bra.b	C5096
+.s:	move.b	#0,(B30177-DT,a4)
+	bra.b	.found
 
-C5068:
-	move.b	#1,(B30177-DT,a4)
-	bra.b	C5096
+.b:	move.b	#1,(B30177-DT,a4)
+	bra.b	.found
 
-C5070:
-	move.b	#2,(B30177-DT,a4)
-	bra.b	C5096
+.w:	move.b	#2,(B30177-DT,a4)
+	bra.b	.found
 
-C5078:
-	move.b	#3,(B30177-DT,a4)
-	bra.b	C5096
+.l:	move.b	#3,(B30177-DT,a4)
+	bra.b	.found
 
-C5080:
-	move.b	#4,(B30177-DT,a4)
-	bra.b	C5096
+.d:	move.b	#4,(B30177-DT,a4)
+	bra.b	.found
 
-C5088:
-	move.b	#5,(B30177-DT,a4)
-	bra.b	C5096
+.x:	move.b	#5,(B30177-DT,a4)
+	bra.b	.found
 
-C5090:
+.p:
 	move.b	#6,(B30177-DT,a4)
-C5096:
-	movem.l	a1/a3,-(sp)
+
+.found:	movem.l	a1/a3,-(sp)
 	bsr	Parse_FindLabel
 	movem.l	(sp)+,a1/a3
-	bne.b	C50BC
+	bne.b	.C50BC
 	or.w	#$8000,(-4,a3)
 	subq.w	#2,a1
 	tst.b	(-1,a3)
-	bne.b	C50C6
+	bne.b	.C50C6
 	clr	-(a3)
 	clr.b	-(a3)
 	movem.l	(sp)+,d0/a3
-	bra.b	C505A
+	bra.b	.lbl
 
-C50BC:
+.C50BC:
 	st	(B30177-DT,a4)
 	movem.l	(sp)+,d0/a3
 	rts
 
-C50C6:
+.C50C6:
 	clr	-(a3)
 	movem.l	(sp)+,d0/a3
-	br	C505A
+	br	.lbl
 
 Parse_FindLabel:
 	btst	#AF_LOCALFOUND,d7
-	bne	Parse_FindlabelLocal
-FINDLABEL_GLOBAL:
+	bne	Parse_FindLabelLocal
+Parse_FindLabelGlobal:
 	lea	(SourceCode-DT,a4),a3
 	move	(a3)+,d0
 	bpl.b	C50F6
@@ -10090,7 +9959,7 @@ C536E:
 ;************** ASSEMBLER TABLE ********
 
 Asm_Table:
-	dc.w	HandleMacroos-Asm_Table	;@
+	dc.w	HandleMacros-Asm_Table	;@
 	dc.w	AsmA-Asm_Table
 	dc.w	AsmB-Asm_Table
 	dc.w	AsmC-Asm_Table
@@ -10098,34 +9967,34 @@ Asm_Table:
 	dc.w	AsmE-Asm_Table
 	dc.w	AsmF-Asm_Table
 	dc.w	AsmG-Asm_Table
-	dc.w	AsmH-Asm_Table	;HandleMacroos-Asm_Table
+	dc.w	AsmH-Asm_Table	;HandleMacros-Asm_Table
 	dc.w	AsmI-Asm_Table
 	dc.w	AsmJ-Asm_Table
-	dc.w	HandleMacroos-Asm_Table ;K
+	dc.w	HandleMacros-Asm_Table ;K
 	dc.w	AsmL-Asm_Table
 	dc.w	AsmM-Asm_Table
 	dc.w	AsmN-Asm_Table
 	dc.w	AsmO-Asm_Table
 	dc.w	AsmP-Asm_Table
-	dc.w	HandleMacroos-Asm_Table ;Q
+	dc.w	HandleMacros-Asm_Table ;Q
 	dc.w	AsmR-Asm_Table
 	dc.w	AsmS-Asm_Table
 	dc.w	AsmT-Asm_Table
 	dc.w	AsmU-Asm_Table
-	dc.w	HandleMacroos-Asm_Table ;V
-	dc.w	HandleMacroos-Asm_Table ;W
+	dc.w	HandleMacros-Asm_Table ;V
+	dc.w	HandleMacros-Asm_Table ;W
 	dc.w	AsmX-Asm_Table
-	dc.w	HandleMacroos-Asm_Table	;Y
-	dc.w	HandleMacroos-Asm_Table	;Z
+	dc.w	HandleMacros-Asm_Table	;Y
+	dc.w	HandleMacros-Asm_Table	;Z
 	dc.w	Asm_at-Asm_Table	;[
 
 Asm_at:
 	cmp.w	#'[G',d0	;lees %gettime
-	bne	HandleMacroos
+	bne	HandleMacros
 	move.w	(a3)+,d0
 	and.w	d4,d0
 	cmp.l	#"ET",d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move.w	(a3)+,d0
 	and.w	d4,d0
 
@@ -10135,7 +10004,7 @@ Asm_at:
 	move.w	(a3)+,d0
 	and.w	d4,d0
 	cmp	#"ME"!$8000,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 
 	moveq.l	#8-1,d6
 	lea	TimeString,a1
@@ -10143,11 +10012,11 @@ Asm_at:
 
 .asm_date:
 	cmp.l	#"DA",d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move.w	(a3)+,d0
 	and.w	d4,d0
 	cmp.l	#"TE"!$8000,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 
 	moveq.l	#0,d3
 	tst.b	(a6)
@@ -10197,14 +10066,14 @@ AsmA:
 	beq	Asm_AU
 	cmp	#'AL',d0
 	beq.b	C53EA
-	br	HandleMacroos
+	br	HandleMacros
 
 C53EA:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"IG",d0
 	beq	C7210
-	br	HandleMacroos
+	br	HandleMacros
 
 C53FA:
 	move	(a3)+,d0
@@ -10231,7 +10100,7 @@ C53FA:
 	beq	InsertText6
 	cmp	#'DW',d0
 	beq.b	C545A
-	br	HandleMacroos
+	br	HandleMacros
 
 W05458:
 	dc.w	0
@@ -10240,11 +10109,11 @@ C545A:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"AT",d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"CH"+$8000,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	tst	d7	;passone
 	bmi.b	C54B4
 	tst	(W05458).l
@@ -10403,7 +10272,7 @@ C566C:
 	beq	C575A
 	cmp	#$C042,d0
 	beq	C5742
-	br	HandleMacroos
+	br	HandleMacros
 
 C568C:
 	move	(a3)+,d0
@@ -10414,7 +10283,7 @@ C568C:
 	beq	C5734
 	cmp	#$C042,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 C56AC:
 	move	(a3)+,d0
@@ -10425,7 +10294,7 @@ C56AC:
 	beq	C5780
 	cmp	#$C042,d0
 	beq	C5768
-	br	HandleMacroos
+	br	HandleMacros
 
 C56CC:
 	move	(a3)+,d0
@@ -10436,7 +10305,7 @@ C56CC:
 	beq.b	C5718
 	cmp	#$C042,d0
 	beq.b	C5700
-	br	HandleMacroos
+	br	HandleMacros
 
 C56E6:
 	move	(a3)+,d0
@@ -10447,7 +10316,7 @@ C56E6:
 	beq.b	C5718
 	cmp	#$C200,d0
 	beq.b	C5700
-	br	HandleMacroos
+	br	HandleMacros
 
 C5700:
 	move	#$D600,d6
@@ -10511,7 +10380,7 @@ C578E:
 	beq	C7230
 	cmp	#$4344,d0
 	beq.b	C57A4
-	br	HandleMacroos
+	br	HandleMacros
 
 C57A4:
 	move	(a3)+,d0
@@ -10522,7 +10391,7 @@ C57A4:
 	beq	ERROR_IllegalSize
 	cmp	#$C042,d0
 	beq	C7230
-	br	HandleMacroos
+	br	HandleMacros
 
 C57C4:
 	move	(a3)+,d0
@@ -10535,7 +10404,7 @@ C57C4:
 	beq.b	C57E8
 	cmp	#$C449,d0
 	beq	C7244
-	br	HandleMacroos
+	br	HandleMacros
 
 C57E8:
 	move	(a3)+,d0
@@ -10546,7 +10415,7 @@ C57E8:
 	beq	C724E
 	cmp	#$C042,d0
 	beq	C723A
-	br	HandleMacroos
+	br	HandleMacros
 
 C5808:
 	move	(a3)+,d0
@@ -10557,7 +10426,7 @@ C5808:
 	beq	C724E
 	cmp	#$C200,d0
 	beq	C723A
-	br	HandleMacroos
+	br	HandleMacros
 
 C5828:
 	move	(a3)+,d0
@@ -10570,7 +10439,7 @@ C5828:
 	beq.b	C58AE
 	cmp	#$CC00,d0
 	beq.b	C5888
-	br	HandleMacroos
+	br	HandleMacros
 
 C5848:
 	move	(a3)+,d0
@@ -10581,7 +10450,7 @@ C5848:
 	beq.b	C5894
 	cmp	#$C200,d0
 	beq.b	C587C
-	br	HandleMacroos
+	br	HandleMacros
 
 C5862:
 	move	(a3)+,d0
@@ -10592,7 +10461,7 @@ C5862:
 	beq.b	C58BA
 	cmp	#$C200,d0
 	beq.b	C58A2
-	br	HandleMacroos
+	br	HandleMacros
 
 C587C:
 	move	#$E1C0,d6
@@ -10657,13 +10526,13 @@ AsmB:
 	beq.b	Asm_BF
 	cmp	#"BK",d0
 	beq.b	C5948
-	br	HandleMacroos
+	br	HandleMacros
 
 C5948:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"PT"+$8000,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	#$4848,d6
 	jmp	(asm_BKPT_opp).l
 
@@ -10685,13 +10554,13 @@ Asm_BF:
 	beq.b	C59AE
 	cmp	#"TS",d0
 	beq.b	C5998
-	br	HandleMacroos
+	br	HandleMacros
 
 C5998:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"T"<<(1*8)+$8000,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	#$E8C0,d6
 	jmp	(C102F2).l
 
@@ -10699,7 +10568,7 @@ C59AE:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"S"<<(1*8)+$8000,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	#$EFC0,d6
 	jmp	(C1031E).l
 
@@ -10707,7 +10576,7 @@ C59C4:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"O"<<(1*8)+$8000,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	#$EDC0,d6
 	jmp	(Asm_Bitfieldopp).l
 
@@ -10717,7 +10586,7 @@ Asm_BFEX:
 	cmp	#"TS"+$8000,d0
 	beq.b	C59F6
 	cmp	#"TU"+$8000,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	#$E9C0,d6
 	jmp	(Asm_Bitfieldopp).l
 
@@ -10729,7 +10598,7 @@ C5A00:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"T"<<(1*8)+$8000,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	#$EEC0,d6
 	jmp	(C102F2).l
 
@@ -10737,7 +10606,7 @@ C5A16:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D200,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	#$ECC0,d6
 	jmp	(C102F2).l
 
@@ -10745,7 +10614,7 @@ C5A2C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C700,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	#$EAC0,d6
 	jmp	(C102F2).l
 
@@ -10754,21 +10623,21 @@ C5A42:
 	and	d4,d0
 	cmp	#"SE",d0
 	beq.b	C5A50
-	br	HandleMacroos
+	br	HandleMacros
 
 C5A50:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"RE",d0
 	beq.b	C5A5E
-	br	HandleMacroos
+	br	HandleMacros
 
 C5A5E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C700,d0
 	beq	CD51E
-	br	HandleMacroos
+	br	HandleMacros
 
 C5A6E:
 	move	(a3)+,d0
@@ -10781,7 +10650,7 @@ C5A6E:
 	beq	C5B1C
 	cmp	#"ET",d0
 	beq.b	C5AB0
-	br	HandleMacroos
+	br	HandleMacros
 
 C5A90:
 	move	(a3)+,d0
@@ -10794,7 +10663,7 @@ C5A90:
 	beq.b	C5AE6
 	cmp	#$C200,d0
 	beq.b	C5ACC
-	br	HandleMacroos
+	br	HandleMacros
 
 C5AB0:
 	move	(a3)+,d0
@@ -10805,7 +10674,7 @@ C5AB0:
 	beq.b	C5B0E
 	cmp	#$C042,d0
 	beq.b	C5B02
-	br	HandleMacroos
+	br	HandleMacros
 
 C5ACC:
 	move	#$6100,d6
@@ -10849,7 +10718,7 @@ C5B2A:
 	beq.b	C5B3E
 	cmp	#$D100,d0
 	beq.b	C5B8E
-	br	HandleMacroos
+	br	HandleMacros
 
 C5B3E:
 	move	(a3)+,d0
@@ -10862,7 +10731,7 @@ C5B3E:
 	beq.b	C5B78
 	cmp	#$C200,d0
 	beq.b	C5B5E
-	br	HandleMacroos
+	br	HandleMacros
 
 C5B5E:
 	move	#$6700,d6
@@ -10893,7 +10762,7 @@ C5B9C:
 	beq.b	C5BB0
 	cmp	#$C500,d0
 	beq.b	C5C00
-	br	HandleMacroos
+	br	HandleMacros
 
 C5BB0:
 	move	(a3)+,d0
@@ -10906,7 +10775,7 @@ C5BB0:
 	beq.b	C5BEA
 	cmp	#$C200,d0
 	beq.b	C5BD0
-	br	HandleMacroos
+	br	HandleMacros
 
 C5BD0:
 	move	#$6600,d6
@@ -10949,7 +10818,7 @@ C5C0E:
 	beq	C5D24
 	cmp	#$4847,d0
 	beq	C5D5A
-	br	HandleMacroos
+	br	HandleMacros
 
 C5C4C:
 	move	#$6500,d6
@@ -10982,7 +10851,7 @@ C5C84:
 	beq.b	C5CBE
 	cmp	#$C200,d0
 	beq.b	C5CA4
-	br	HandleMacroos
+	br	HandleMacros
 
 C5CA4:
 	move	#$6500,d6
@@ -11012,7 +10881,7 @@ C5CD4:
 	beq.b	C5D0E
 	cmp	#$C200,d0
 	beq.b	C5CF4
-	br	HandleMacroos
+	br	HandleMacros
 
 C5CF4:
 	move	#$6400,d6
@@ -11040,7 +10909,7 @@ C5D24:
 	beq.b	C5D4C
 	cmp	#$C042,d0
 	beq.b	C5D40
-	br	HandleMacroos
+	br	HandleMacros
 
 C5D40:
 	move	#$0880,d6
@@ -11061,7 +10930,7 @@ C5D5A:
 	beq.b	C5D82
 	cmp	#$C042,d0
 	beq.b	C5D76
-	br	HandleMacroos
+	br	HandleMacros
 
 C5D76:
 	move	#$0840,d6
@@ -11080,7 +10949,7 @@ C5D90:
 	beq.b	C5DDA
 	cmp	#$5354,d0
 	beq.b	C5DA4
-	br	HandleMacroos
+	br	HandleMacros
 
 C5DA4:
 	move	(a3)+,d0
@@ -11091,7 +10960,7 @@ C5DA4:
 	beq.b	C5DCC
 	cmp	#$C042,d0
 	beq.b	C5DC0
-	br	HandleMacroos
+	br	HandleMacros
 
 C5DC0:
 	move	#$8800,d6
@@ -11123,7 +10992,7 @@ asm_BR:
 	beq.b	.asm_BRAl
 	cmp	#$C042,d0	;bra.b
 	beq.b	.asm_BRAb
-	br	HandleMacroos
+	br	HandleMacros
 
 .asm_BRAcont:
 	move	(a3)+,d0
@@ -11136,7 +11005,7 @@ asm_BR:
 	beq.b	.asm_BRAl
 	cmp	#$C200,d0
 	beq.b	.asm_BRAb
-	br	HandleMacroos
+	br	HandleMacros
 
 .asm_BRAb:
 	move	#$6000,d6
@@ -11182,7 +11051,7 @@ C5E6A:
 	beq	CDB76
 	cmp	#$C500,d0
 	beq.b	C5EC6
-	br	HandleMacroos
+	br	HandleMacros
 
 C5EB8:
 	move	#$6D00,d6
@@ -11215,7 +11084,7 @@ C5EF0:
 	beq.b	C5F2A
 	cmp	#$C200,d0
 	beq.b	C5F10
-	br	HandleMacroos
+	br	HandleMacros
 
 C5F10:
 	move	#$6D00,d6
@@ -11245,7 +11114,7 @@ C5F40:
 	beq.b	C5F7A
 	cmp	#$C200,d0
 	beq.b	C5F60
-	br	HandleMacroos
+	br	HandleMacros
 
 C5F60:
 	move	#$6300,d6
@@ -11275,7 +11144,7 @@ C5F90:
 	beq.b	C5FCA
 	cmp	#$C200,d0
 	beq.b	C5FB0
-	br	HandleMacroos
+	br	HandleMacros
 
 C5FB0:
 	move	#$6500,d6
@@ -11305,7 +11174,7 @@ C5FE0:
 	beq.b	C601A
 	cmp	#$C200,d0
 	beq.b	C6000
-	br	HandleMacroos
+	br	HandleMacros
 
 C6000:
 	move	#$6F00,d6
@@ -11341,7 +11210,7 @@ C6030:
 	beq	CDD44
 	cmp	#$D000,d0
 	beq	CDDDA
-	br	HandleMacroos
+	br	HandleMacros
 
 C6070:
 	move	(a3)+,d0
@@ -11354,7 +11223,7 @@ C6070:
 	beq	C6140
 	cmp	#$C900,d0
 	beq.b	C6102
-	br	HandleMacroos
+	br	HandleMacros
 
 C6092:
 	move	(a3)+,d0
@@ -11367,7 +11236,7 @@ C6092:
 	beq.b	C60EC
 	cmp	#$C200,d0
 	beq.b	C60D2
-	br	HandleMacroos
+	br	HandleMacros
 
 C60B2:
 	move	(a3)+,d0
@@ -11380,7 +11249,7 @@ C60B2:
 	beq.b	C612A
 	cmp	#$C200,d0
 	beq.b	C6110
-	br	HandleMacroos
+	br	HandleMacros
 
 C60D2:
 	move	#$6200,d6
@@ -11439,7 +11308,7 @@ C614E:
 	beq	C61F4
 	cmp	#$CE44,d0
 	beq.b	C61B8
-	br	HandleMacroos
+	br	HandleMacros
 
 C6178:
 	move	(a3)+,d0
@@ -11452,7 +11321,7 @@ C6178:
 	beq.b	C61DE
 	cmp	#$C200,d0
 	beq.b	C61C4
-	br	HandleMacroos
+	br	HandleMacros
 
 C6198:
 	move	(a3)+,d0
@@ -11465,7 +11334,7 @@ C6198:
 	beq.b	C621C
 	cmp	#$C200,d0
 	beq.b	C6202
-	br	HandleMacroos
+	br	HandleMacros
 
 C61B8:
 	move	#$4AFA,d6
@@ -11523,7 +11392,7 @@ C6240:
 	beq.b	C6254
 	cmp	#$C900,d0
 	beq.b	C62A6
-	br	HandleMacroos
+	br	HandleMacros
 
 C6254:
 	move	(a3)+,d0
@@ -11536,7 +11405,7 @@ C6254:
 	beq.b	C628E
 	cmp	#$C200,d0
 	beq.b	C6274
-	br	HandleMacroos
+	br	HandleMacros
 
 C6274:
 	move	#$6B00,d6
@@ -11567,7 +11436,7 @@ C62B4:
 	beq.b	C62C8
 	cmp	#$CC00,d0
 	beq.b	C6318
-	br	HandleMacroos
+	br	HandleMacros
 
 C62C8:
 	move	(a3)+,d0
@@ -11580,7 +11449,7 @@ C62C8:
 	beq.b	C6302
 	cmp	#$C200,d0
 	beq.b	C62E8
-	br	HandleMacroos
+	br	HandleMacros
 
 C62E8:
 	move	#$6A00,d6
@@ -11615,7 +11484,7 @@ C6326:
 	beq.b	C63B8
 	cmp	#$C300,d0
 	beq	C63F6
-	br	HandleMacroos
+	br	HandleMacros
 
 C6348:
 	move	(a3)+,d0
@@ -11628,7 +11497,7 @@ C6348:
 	beq.b	C63A2
 	cmp	#$C200,d0
 	beq.b	C6388
-	br	HandleMacroos
+	br	HandleMacros
 
 C6368:
 	move	(a3)+,d0
@@ -11641,7 +11510,7 @@ C6368:
 	beq.b	C63D2
 	cmp	#$C200,d0
 	beq.b	C63C6
-	br	HandleMacroos
+	br	HandleMacros
 
 C6388:
 	move	#$6900,d6
@@ -11702,7 +11571,7 @@ AsmC:
 	beq.b	C647E
 	cmp	#'CP',d0
 	beq.b	Asm_CP
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_CP:
 	move	(a3)+,d0
@@ -11710,7 +11579,7 @@ Asm_CP:
 ;	cmp	#"U=",d0	;CPU=
 ;	beq.w	m68_ChangeCpuType
 	cmp	#"US",d0	;CPUS
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"HA"+$8000,d0	;CPUSHA
@@ -11718,7 +11587,7 @@ Asm_CP:
 	cmp	#"HL"+$8000,d0	;CPUSHL
 	beq.b	C646A
 	cmp	#"HP"+$8000,d0	;CPUSHP
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	#$F430,d6
 	jmp	(C100D8).l
 
@@ -11734,7 +11603,7 @@ C647E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"NV",d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CC00,d0
@@ -11743,7 +11612,7 @@ C647E:
 	beq.b	C64AE
 	cmp	#$C100,d0
 	beq.b	C64A4
-	br	HandleMacroos
+	br	HandleMacros
 
 C64A4:
 	move	#$F418,d6
@@ -11770,13 +11639,13 @@ C64C2:
 	beq.b	C651E
 	cmp	#"LL",d0
 	beq.b	C64EA
-	br	HandleMacroos
+	br	HandleMacros
 
 C64EA:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CD00,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	#$06C0,d6
 	jmp	(C10134).l
 
@@ -11790,7 +11659,7 @@ C6500:
 	beq.b	C6528
 	cmp	#"@B"+$8000,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 C651E:
 	move	#$0CFC,d6
@@ -11810,7 +11679,7 @@ C6532:
 	beq.b	C6562
 	cmp	#$C200,d0
 	beq.b	C654E
-	br	HandleMacroos
+	br	HandleMacros
 
 C654E:
 	move	#$0AC0,d6
@@ -11829,7 +11698,7 @@ Asm_CN:
 	and	d4,d0
 	cmp	#$CF50,d0
 	beq	Asm_CNOP
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_CNOP:
 	jsr	(Parse_GetDefinedValue).l
@@ -11873,14 +11742,14 @@ Asm_CM:
 	beq.b	cmp2_stuff
 	cmp	#$4558,d0	;CMEX
 	beq.b	C660A
-	br	HandleMacroos
+	br	HandleMacros
 
 C660A:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C954,d0	;cmexit
 	beq	CE45C
-	br	HandleMacroos
+	br	HandleMacros
 
 cmp2_stuff:
 	move	(a3)+,d0
@@ -11891,7 +11760,7 @@ cmp2_stuff:
 	beq	cmp2_stuff_l
 	cmp	#$C042,d0	;cmp2.b
 	beq	cmp2_stuff_b
-	br	HandleMacroos
+	br	HandleMacros
 
 C663A:
 	move	(a3)+,d0
@@ -11902,7 +11771,7 @@ C663A:
 	beq.b	C66BC
 	cmp	#$C200,d0
 	beq.b	C66A4
-	br	HandleMacroos
+	br	HandleMacros
 
 C6654:
 	move	(a3)+,d0
@@ -11913,7 +11782,7 @@ C6654:
 	beq.b	C66BC
 	cmp	#$C042,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 C6670:
 	move	(a3)+,d0
@@ -11924,7 +11793,7 @@ C6670:
 	beq.b	C66BC
 	cmp	#$C042,d0
 	beq.b	C66A4
-	br	HandleMacroos
+	br	HandleMacros
 
 C668A:
 	move	(a3)+,d0
@@ -11935,7 +11804,7 @@ C668A:
 	beq.b	C66E2
 	cmp	#$C042,d0
 	beq.b	C66CA
-	br	HandleMacroos
+	br	HandleMacros
 
 C66A4:
 	move	#$BC01,d6
@@ -11974,7 +11843,7 @@ C66F0:
 	beq.b	C6704
 	cmp	#$D200,d0
 	beq.b	C672A
-	br	HandleMacroos
+	br	HandleMacros
 
 C6704:
 	move	(a3)+,d0
@@ -11985,7 +11854,7 @@ C6704:
 	beq.b	C6736
 	cmp	#$C200,d0
 	beq.b	C671E
-	br	HandleMacroos
+	br	HandleMacros
 
 C671E:
 	move	#$4200,d6
@@ -12013,7 +11882,7 @@ C6744:
 	beq	C7298
 	cmp	#$4B12,d0
 	beq.b	C6788
-	br	HandleMacroos
+	br	HandleMacros
 
 C6768:
 	move	(a3)+,d0
@@ -12024,7 +11893,7 @@ C6768:
 	beq	C728A
 	cmp	#$C200,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 C6788:
 	move	(a3)+,d0
@@ -12035,7 +11904,7 @@ C6788:
 	beq	C72A6
 	cmp	#$C042,d0
 	beq	C72B4
-	br	HandleMacroos
+	br	HandleMacros
 
 AsmD:
 	cmp	#'DS',d0
@@ -12054,7 +11923,7 @@ AsmD:
 	beq	CD968
 	cmp	#"DC"+$8000,d0
 	beq	CDAE6
-	br	HandleMacroos
+	br	HandleMacros
 
 C67E8:
 	move	(a3)+,d0
@@ -12065,7 +11934,7 @@ C67E8:
 	beq	CD9A0
 	cmp	#"@B"+$8000,d0
 	beq	CD9D8
-	br	HandleMacroos
+	br	HandleMacros
 
 C6808:
 	move	(a3)+,d0
@@ -12088,7 +11957,7 @@ C6808:
 	beq.b	C6856
 	cmp	#"B"<<(1*8)+$8000,d0
 	beq	CDB76
-	br	HandleMacroos
+	br	HandleMacros
 
 C6856:
 	move	(a3)+,d0
@@ -12107,7 +11976,7 @@ C6856:
 	beq	CDD44
 	cmp	#$D000,d0
 	beq	CDDDA
-	br	HandleMacroos
+	br	HandleMacros
 
 C6896:
 	move	(a3)+,d0
@@ -12126,7 +11995,7 @@ C6896:
 	beq	CE202
 	cmp	#$C050,d0
 	beq	CE202
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_DI:
 	move	(a3)+,d0
@@ -12139,7 +12008,7 @@ Asm_DI:
 	beq.b	Asm_DIVU
 	cmp	#$5653,d0	;divs
 	beq.b	C691C
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_DIVU:
 	move	(a3)+,d0
@@ -12152,7 +12021,7 @@ Asm_DIVU:
 	beq.b	C6964
 	cmp	#$CC00,d0
 	beq.b	C6970
-	br	HandleMacroos
+	br	HandleMacros
 
 C691C:
 	move	(a3)+,d0
@@ -12165,7 +12034,7 @@ C691C:
 	beq.b	C693C
 	cmp	#$CC00,d0	;DIVSL
 	beq.b	C6948
-	br	HandleMacroos
+	br	HandleMacros
 
 C693C:
 	move	(a3)+,d0
@@ -12261,7 +12130,7 @@ Asm_DBCC:
 	beq	C6B24
 	cmp	#$CC53,d0
 	beq	C6B08
-	br	HandleMacroos
+	br	HandleMacros
 
 C6A44:
 	move	#$54C8,d6
@@ -12366,7 +12235,7 @@ AsmE:
 	beq	C6CD2
 	cmp	#"EL",d0
 	beq	C6BFE
-	br	HandleMacroos
+	br	HandleMacros
 
 C6B72:
 	move	(a3)+,d0
@@ -12389,13 +12258,13 @@ C6B72:
 	beq.b	C6BDE
 	cmp	#"DO",d0
 	beq.b	C6BBA
-	br	HandleMacroos
+	br	HandleMacros
 
 C6BBA:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"FF"+$8000,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	bclr	#AF_OFFSET,d7
 	rts
 
@@ -12404,28 +12273,28 @@ C6BCC:
 	and.b	#$7F,d0
 	cmp.b	#$21,d0
 	beq	CE5BC
-	br	HandleMacroos
+	br	HandleMacros
 
 C6BDE:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D900,d0
 	beq	CD778
-	br	HandleMacroos
+	br	HandleMacros
 
 C6BEE:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C600,d0
 	beq	CE5BC
-	br	HandleMacroos
+	br	HandleMacros
 
 C6BFE:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D345,d0
 	beq	CE5AC
-	br	HandleMacroos
+	br	HandleMacros
 
 C6C0E:
 	move	(a3)+,d0
@@ -12444,14 +12313,14 @@ C6C0E:
 	beq.b	C6C9A
 	cmp	#$5442,d0
 	beq.b	C6C8E
-	br	HandleMacroos
+	br	HandleMacros
 
 C6C44:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CE00,d0
 	beq	CD75C
-	br	HandleMacroos
+	br	HandleMacros
 
 C6C54:
 	move	(a3)+,d0
@@ -12462,7 +12331,7 @@ C6C54:
 	beq.b	C6CAC
 	cmp	#$C200,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 C6C72:
 	move	(a3)+,d0
@@ -12473,7 +12342,7 @@ C6C72:
 	beq.b	C6CC4
 	cmp	#$C200,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 C6C8E:
 	move	(a3)+,d0
@@ -12513,7 +12382,7 @@ C6CD2:
 	beq.b	C6D0C
 	cmp	#$D249,d0
 	beq.b	C6D30
-	br	HandleMacroos
+	br	HandleMacros
 
 C6CF2:
 	move	(a3)+,d0
@@ -12524,7 +12393,7 @@ C6CF2:
 	beq.b	C6D3A
 	cmp	#$C200,d0
 	beq.b	C6D26
-	br	HandleMacroos
+	br	HandleMacros
 
 C6D0C:
 	move	(a3)+,d0
@@ -12535,7 +12404,7 @@ C6D0C:
 	beq.b	C6D3A
 	cmp	#$C042,d0
 	beq.b	C6D26
-	br	HandleMacroos
+	br	HandleMacros
 
 C6D26:
 	move	#$BA00,d6
@@ -12557,7 +12426,7 @@ C6D46:
 	and	d4,d0
 	cmp	#$C54E,d0
 	beq	CD93C
-	br	HandleMacroos
+	br	HandleMacros
 
 C6D56:
 	move	(a3)+,d0
@@ -12566,7 +12435,7 @@ C6D56:
 	beq	Asm_EQU
 	cmp	#$D552,d0
 	beq	CD706
-	br	HandleMacroos
+	br	HandleMacros
 
 AsmF:
 	cmp	#'FA',d0
@@ -12595,7 +12464,7 @@ AsmF:
 	beq	AsmFS
 	cmp	#'FT',d0
 	beq.b	C6DD8
-	br	HandleMacroos
+	br	HandleMacros
 
 C6DD8:
 	move	(a3)+,d0
@@ -12614,14 +12483,14 @@ C6DD8:
 	beq	C6ECE
 	cmp	#"WO",d0
 	beq.b	C6E16
-	br	HandleMacroos
+	br	HandleMacros
 
 C6E16:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"TO",d0
 	beq.b	C6E24
-	br	HandleMacroos
+	br	HandleMacros
 
 C6E24:
 	move	(a3)+,d0
@@ -12630,7 +12499,7 @@ C6E24:
 	beq.b	C6E38
 	cmp	#$D800,d0
 	beq.b	C6EB2
-	br	HandleMacroos
+	br	HandleMacros
 
 C6E38:
 	move	(a3)+,d0
@@ -12703,7 +12572,7 @@ C6ECE:
 	beq.b	C6F46
 	cmp	#$C050,d0
 	beq.b	C6F54
-	br	HandleMacroos
+	br	HandleMacros
 
 C6F00:
 	move.l	#$003AF200,d6
@@ -12741,7 +12610,6 @@ C6F54:
 	jmp	(CFA78).l
 
 C6F62:
-;		jsr	test_debug
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D046,d0
@@ -12766,7 +12634,7 @@ C6F62:
 	beq	C7A8A
 	cmp	#$504C,d0
 	beq	C7B90
-	br	HandleMacroos
+	br	HandleMacros
 
 C6FC2:
 	move	(a3)+,d0
@@ -12817,7 +12685,7 @@ C7032:
 	beq.b	C705A
 	cmp	#$5140,d0
 	beq.b	C7046
-	br	HandleMacroos
+	br	HandleMacros
 
 C7046:
 	move	(a3)+,d0
@@ -12867,7 +12735,7 @@ C707E:
 	beq	C759A
 	cmp	#'R@',d0
 	beq	C71F8
-	br	HandleMacroos
+	br	HandleMacros
 
 C70E0:
 	move	(a3)+,d0
@@ -12988,14 +12856,14 @@ C7210:
 	and	d4,d0
 	cmp	#$CE00,d0
 	beq	Asm_CNOP
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_AU:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D44F,d0
 	beq	Asm_AUTO
-	br	HandleMacroos
+	br	HandleMacros
 
 C7230:
 	move	#$C100,d6
@@ -13371,7 +13239,7 @@ C75BE:
 	beq	C774C
 	cmp	#$4C45,d0
 	beq	C7738
-	br	HandleMacroos
+	br	HandleMacros
 
 C7620:
 	move	(a3)+,d0
@@ -13526,7 +13394,7 @@ C7770:
 	beq	C790E
 	cmp	#$4754,d0
 	beq	C78FA
-	br	HandleMacroos
+	br	HandleMacros
 
 C77D6:
 	move	(a3)+,d0
@@ -13539,7 +13407,7 @@ C77D6:
 	beq.b	C7816
 	cmp	#$C04C,d0
 	beq.b	C7822
-	br	HandleMacroos
+	br	HandleMacros
 
 C77F6:
 	move	(a3)+,d0
@@ -13690,7 +13558,7 @@ C796A:
 	beq	C7A66
 	cmp	#$4E45,d0
 	beq	C7A52
-	br	HandleMacroos
+	br	HandleMacros
 
 C79AA:
 	move	(a3)+,d0
@@ -13795,7 +13663,7 @@ C7A8A:
 	beq	C7B72
 	cmp	#$4C45,d0
 	beq	C7B5E
-	br	HandleMacroos
+	br	HandleMacros
 
 C7AC8:
 	move	(a3)+,d0
@@ -13892,7 +13760,7 @@ C7B90:
 	beq.b	C7BF6
 	cmp	#$4540,d0
 	beq.b	C7BE2
-	br	HandleMacroos
+	br	HandleMacros
 
 C7BB0:
 	move	(a3)+,d0
@@ -13941,7 +13809,7 @@ C7C14:
 	and	d4,d0
 	cmp	#$544F,d0
 	beq.b	C7C22
-	br	HandleMacroos
+	br	HandleMacros
 
 C7C22:
 	move	(a3)+,d0
@@ -13950,7 +13818,7 @@ C7C22:
 	beq.b	C7C36
 	cmp	#$D800,d0
 	beq.b	C7CA6
-	br	HandleMacroos
+	br	HandleMacros
 
 C7C36:
 	move	(a3)+,d0
@@ -13969,7 +13837,7 @@ C7C36:
 	beq.b	C7CA6
 	cmp	#$D000,d0
 	beq	C7CB2
-	br	HandleMacroos
+	br	HandleMacros
 
 C7C6A:
 	move.l	#$0012F200,d6
@@ -14027,7 +13895,7 @@ C7CBE:
 	beq.b	C7D3E
 	cmp	#$C050,d0
 	beq	C7D4A
-	br	HandleMacroos
+	br	HandleMacros
 
 C7D02:
 	move.l	#$000FF200,d6
@@ -14181,7 +14049,7 @@ AsmFS:
 	beq	C83D8
 	cmp	#$D354,d0
 	beq	C83F0
-	br	HandleMacroos
+	br	HandleMacros
 
 C7ED6:
 	move	(a3)+,d0
@@ -14200,7 +14068,7 @@ C7ED6:
 	beq.b	C7F46
 	cmp	#$C050,d0
 	beq	C7F52
-	br	HandleMacroos
+	br	HandleMacros
 
 C7F0A:
 	move.l	#$0028F200,d6
@@ -14244,7 +14112,7 @@ C7F5E:
 	beq.b	C7F72
 	cmp	#$D400,d0
 	beq.b	C7FE2
-	br	HandleMacroos
+	br	HandleMacros
 
 C7F72:
 	move	(a3)+,d0
@@ -14323,7 +14191,7 @@ C7FFA:
 	beq.b	C8080
 	cmp	#$C050,d0
 	beq.b	C808C
-	br	HandleMacroos
+	br	HandleMacros
 
 C8044:
 	move.l	#$000EF200,d6
@@ -14367,7 +14235,7 @@ C8098:
 	beq.b	C811C
 	cmp	#$5340,d0
 	beq.b	C80AC
-	br	HandleMacroos
+	br	HandleMacros
 
 C80AC:
 	move	(a3)+,d0
@@ -14498,7 +14366,7 @@ C81E2:
 	and	d4,d0
 	cmp	#$D100,d0
 	beq.b	C81F0
-	br	HandleMacroos
+	br	HandleMacros
 
 C81F0:
 	move.l	#$0011F240,d6
@@ -14513,7 +14381,7 @@ C81FA:
 	beq.b	C822C
 	cmp	#$4D55,d0
 	beq.b	C8216
-	br	HandleMacroos
+	br	HandleMacros
 
 C8216:
 	move	(a3)+,d0
@@ -14522,7 +14390,7 @@ C8216:
 	beq	C82B2
 	cmp	#$4C40,d0
 	beq.b	C8244
-	br	HandleMacroos
+	br	HandleMacros
 
 C822C:
 	move	(a3)+,d0
@@ -14531,7 +14399,7 @@ C822C:
 	beq	C8338
 	cmp	#$5640,d0
 	beq	C82CA
-	br	HandleMacroos
+	br	HandleMacros
 
 C8244:
 	move	(a3)+,d0
@@ -14660,7 +14528,7 @@ C8364:
 	beq.b	C8388
 	cmp	#$C500,d0
 	beq.b	C8392
-	br	HandleMacroos
+	br	HandleMacros
 
 C8388:
 	move.l	#$001DF240,d6
@@ -14685,7 +14553,7 @@ C83B0:
 	beq.b	C83C4
 	cmp	#$D400,d0
 	beq.b	C83CE
-	br	HandleMacroos
+	br	HandleMacros
 
 C83C4:
 	move.l	#$001AF240,d6
@@ -14700,7 +14568,7 @@ C83D8:
 	and	d4,d0
 	cmp	#$C500,d0
 	beq.b	C83E6
-	br	HandleMacroos
+	br	HandleMacros
 
 C83E6:
 	move.l	#$001EF240,d6
@@ -14721,7 +14589,7 @@ C8404:
 	beq.b	C8422
 	cmp	#$C500,d0
 	beq.b	C8418
-	br	HandleMacroos
+	br	HandleMacros
 
 C8418:
 	move.l	#$000DF240,d6
@@ -14738,7 +14606,7 @@ C842C:
 	beq.b	C844A
 	cmp	#$C500,d0
 	beq.b	C8440
-	br	HandleMacroos
+	br	HandleMacros
 
 C8440:
 	move.l	#$000BF240,d6
@@ -14753,7 +14621,7 @@ C8454:
 	and	d4,d0
 	cmp	#$D100,d0
 	beq.b	C8462
-	br	HandleMacroos
+	br	HandleMacros
 
 C8462:
 	move.l	#$0009F240,d6
@@ -14774,7 +14642,7 @@ C8480:
 	beq.b	C8494
 	cmp	#$C500,d0
 	beq.b	C849E
-	br	HandleMacroos
+	br	HandleMacros
 
 C8494:
 	move.l	#$0004F240,d6
@@ -14793,7 +14661,7 @@ C84A8:
 	beq	C84D0
 	cmp	#$CC00,d0
 	beq	C84DA
-	br	HandleMacroos
+	br	HandleMacros
 
 C84C6:
 	move.l	#$0002F240,d6
@@ -14830,7 +14698,7 @@ C850C:
 	beq.b	C858E
 	cmp	#$4C45,d0
 	beq.b	C8520
-	br	HandleMacroos
+	br	HandleMacros
 
 C8520:
 	move	(a3)+,d0
@@ -14891,7 +14759,7 @@ C85A6:
 	and	d4,d0
 	cmp	#$C500,d0
 	beq.b	C85B4
-	br	HandleMacroos
+	br	HandleMacros
 
 C85B4:
 	move	#$F300,d6
@@ -14906,21 +14774,21 @@ C85BC:
 	beq.b	C85FC
 	cmp	#$4553,d0
 	beq.b	C85D8
-	br	HandleMacroos
+	br	HandleMacros
 
 C85D8:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$544F,d0
 	beq.b	C85E6
-	br	HandleMacroos
+	br	HandleMacros
 
 C85E6:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D245,d0
 	beq.b	C85F4
-	br	HandleMacroos
+	br	HandleMacros
 
 C85F4:
 	move	#$F340,d6
@@ -14989,7 +14857,7 @@ C8682:
 	beq.b	C86AC
 	cmp	#$CF50,d0
 	beq.b	C869E
-	br	HandleMacroos
+	br	HandleMacros
 
 C869E:
 	move.l	#$F2800000,d6
@@ -15063,7 +14931,7 @@ Asm_FM:
 	beq.b	C87CC
 	cmp	#$554C,d0	fmUL
 	beq.b	C875E
-	br	HandleMacroos
+	br	HandleMacros
 
 C875E:
 	move	(a3)+,d0
@@ -15132,7 +15000,7 @@ Asm_FMOV:
 	beq.b	C880C
 	cmp	#$C54D,d0	;fmovem
 	beq.b	asm_fmoveM
-	br	HandleMacroos
+	br	HandleMacros
 
 C880C:
 	move	(a3)+,d0
@@ -15150,7 +15018,7 @@ C8822:
 	beq.b	C8842
 	cmp	#$5240,d0
 	beq.b	C8836
-	br	HandleMacroos
+	br	HandleMacros
 
 C8836:
 	move	(a3)+,d0
@@ -15274,7 +15142,7 @@ C895C:
 	and	d4,d0
 	cmp	#$4F47,d0
 	beq.b	C896A
-	br	HandleMacroos
+	br	HandleMacros
 
 C896A:
 	move	(a3)+,d0
@@ -15293,7 +15161,7 @@ C896A:
 	beq	C8A42
 	cmp	#$4E50,d0
 	beq.b	C89A8
-	br	HandleMacroos
+	br	HandleMacros
 
 C89A8:
 	move	(a3)+,d0
@@ -15302,7 +15170,7 @@ C89A8:
 	beq.b	C8A2A
 	cmp	#$1140,d0
 	beq.b	C89BC
-	br	HandleMacroos
+	br	HandleMacros
 
 C89BC:
 	move	(a3)+,d0
@@ -15483,7 +15351,7 @@ C8B4E:
 	beq.b	C8BBC
 	cmp	#$C050,d0
 	beq.b	C8BC8
-	br	HandleMacroos
+	br	HandleMacros
 
 C8B80:
 	move.l	#$0015F200,d6
@@ -15527,7 +15395,7 @@ C8BD4:
 	beq	C8C68
 	cmp	#$4E54,d0
 	beq.b	C8BEA
-	br	HandleMacroos
+	br	HandleMacros
 
 C8BEA:
 	move	(a3)+,d0
@@ -15550,7 +15418,7 @@ C8BEA:
 	beq.b	C8C68
 	cmp	#$C050,d0
 	beq.b	C8C74
-	br	HandleMacroos
+	br	HandleMacros
 
 C8C2C:
 	move.l	#$0001F200,d6
@@ -15604,7 +15472,7 @@ C8C80:
 	beq.b	C8CEE
 	cmp	#$C050,d0
 	beq.b	C8CFA
-	br	HandleMacroos
+	br	HandleMacros
 
 C8CB2:
 	move.l	#$0003F200,d6
@@ -15646,7 +15514,7 @@ C8D06:
 	and	d4,d0
 	cmp	#$4554,d0
 	beq.b	C8D14
-	br	HandleMacroos
+	br	HandleMacros
 
 C8D14:
 	move	(a3)+,d0
@@ -15655,7 +15523,7 @@ C8D14:
 	beq	C8DC4
 	cmp	#$4D41,d0
 	beq.b	C8D2A
-	br	HandleMacroos
+	br	HandleMacros
 
 C8D2A:
 	move	(a3)+,d0
@@ -15664,7 +15532,7 @@ C8D2A:
 	beq.b	C8DAC
 	cmp	#$4E40,d0
 	beq.b	C8D3E
-	br	HandleMacroos
+	br	HandleMacros
 
 C8D3E:
 	move	(a3)+,d0
@@ -15727,7 +15595,7 @@ C8DC4:
 	beq.b	C8E46
 	cmp	#$5040,d0
 	beq.b	C8DD8
-	br	HandleMacroos
+	br	HandleMacros
 
 C8DD8:
 	move	(a3)+,d0
@@ -15788,7 +15656,7 @@ C8E5E:
 	and	d4,d0
 	cmp	#$544F,d0
 	beq.b	C8E6C
-	br	HandleMacroos
+	br	HandleMacros
 
 C8E6C:
 	move	(a3)+,d0
@@ -15799,7 +15667,7 @@ C8E6C:
 	beq	C8F24
 	cmp	#$584D,d0
 	beq.b	C8E8A
-	br	HandleMacroos
+	br	HandleMacros
 
 C8E8A:
 	move	(a3)+,d0
@@ -15808,7 +15676,7 @@ C8E8A:
 	beq.b	C8F0C
 	cmp	#$1140,d0
 	beq.b	C8E9E
-	br	HandleMacroos
+	br	HandleMacros
 
 C8E9E:
 	move	(a3)+,d0
@@ -15943,7 +15811,7 @@ AsmFD:
 	beq	C9258
 	cmp	#$424C,d0
 	beq	C92A2
-	br	HandleMacroos
+	br	HandleMacros
 
 AsmFDIV:
 	move	(a3)+,d0
@@ -16012,7 +15880,7 @@ C90A2:
 	and	d4,d0
 	cmp	#$D100,d0
 	beq.b	C90B0
-	br	HandleMacroos
+	br	HandleMacros
 
 C90B0:
 	move.l	#$0001F248,d6
@@ -16033,7 +15901,7 @@ C90BA:
 	beq.b	C910E
 	cmp	#$D200,d0
 	beq.b	C9118
-	br	HandleMacroos
+	br	HandleMacros
 
 C90E6:
 	move.l	#$0002F248,d6
@@ -16074,7 +15942,7 @@ C9122:
 	beq.b	C9176
 	cmp	#$CC45,d0
 	beq.b	C9180
-	br	HandleMacroos
+	br	HandleMacros
 
 C914E:
 	move.l	#$0008F248,d6
@@ -16117,7 +15985,7 @@ C918A:
 	beq.b	C91DA
 	cmp	#$C754,d0
 	beq.b	C91E4
-	br	HandleMacroos
+	br	HandleMacros
 
 C91BC:
 	move.l	#$0019F248,d6
@@ -16144,7 +16012,7 @@ C91EE:
 	and	d4,d0
 	cmp	#$C500,d0
 	beq.b	C91FC
-	br	HandleMacroos
+	br	HandleMacros
 
 C91FC:
 	move.l	#$0018F248,d6
@@ -16165,7 +16033,7 @@ C9210:
 	beq.b	C9244
 	cmp	#$CE45,d0
 	beq.b	C924E
-	br	HandleMacroos
+	br	HandleMacros
 
 C9230:
 	move.l	#$0010F248,d6
@@ -16194,7 +16062,7 @@ C9258:
 	beq.b	C928E
 	cmp	#$CC45,d0
 	beq	C9298
-	br	HandleMacroos
+	br	HandleMacros
 
 C927A:
 	move.l	#$0012F248,d6
@@ -16219,7 +16087,7 @@ C92A2:
 	beq.b	C92B6
 	cmp	#$C500,d0
 	beq.b	C92C0
-	br	HandleMacroos
+	br	HandleMacros
 
 C92B6:
 	move.l	#$0014F248,d6
@@ -16240,7 +16108,7 @@ C92CA:
 	beq	C936E
 	cmp	#$4F53,d0
 	beq.b	C92F0
-	br	HandleMacroos
+	br	HandleMacros
 
 C92F0:
 	move	(a3)+,d0
@@ -16481,7 +16349,7 @@ C9492:
 	beq	C984A
 	cmp	#$5354,d0
 	beq	C9836
-	br	HandleMacroos
+	br	HandleMacros
 
 C95AC:
 	move	(a3)+,d0
@@ -16558,7 +16426,7 @@ C963C:
 	beq.b	C9664
 	cmp	#$5140,d0
 	beq.b	C9650
-	br	HandleMacroos
+	br	HandleMacros
 
 C9650:
 	move	(a3)+,d0
@@ -16588,7 +16456,7 @@ C9674:
 	beq.b	C96B8
 	cmp	#$4540,d0
 	beq.b	C96A4
-	br	HandleMacroos
+	br	HandleMacros
 
 C9694:
 	move	#$F296,d6
@@ -16634,7 +16502,7 @@ C96C8:
 	beq.b	C972A
 	cmp	#$C500,d0
 	beq.b	C973E
-	br	HandleMacroos
+	br	HandleMacros
 
 C9706:
 	move	(a3)+,d0
@@ -16715,7 +16583,7 @@ C9796:
 	beq.b	C97EE
 	cmp	#$5440,d0
 	beq.b	C97DA
-	br	HandleMacroos
+	br	HandleMacros
 
 C97B6:
 	move	(a3)+,d0
@@ -16758,7 +16626,7 @@ C97FE:
 	beq.b	C9826
 	cmp	#$4540,d0
 	beq.b	C9812
-	br	HandleMacroos
+	br	HandleMacros
 
 C9812:
 	move	(a3)+,d0
@@ -16801,7 +16669,7 @@ C985A:
 	beq.b	C986E
 	cmp	#$C04C,d0
 	beq.b	C9876
-	br	HandleMacroos
+	br	HandleMacros
 
 C986E:
 	move	#$F290,d6
@@ -16822,7 +16690,7 @@ C987E:
 	beq.b	C989E
 	cmp	#$C500,d0
 	beq.b	C98B2
-	br	HandleMacroos
+	br	HandleMacros
 
 C989E:
 	move	(a3)+,d0
@@ -16831,7 +16699,7 @@ C989E:
 	beq.b	C98B2
 	cmp	#$CC00,d0
 	beq.b	C98BA
-	br	HandleMacroos
+	br	HandleMacros
 
 C98B2:
 	move	#$F28D,d6
@@ -16848,7 +16716,7 @@ C98C2:
 	beq.b	C98D6
 	cmp	#$CC00,d0
 	beq.b	C98DE
-	br	HandleMacroos
+	br	HandleMacros
 
 C98D6:
 	move	#$F28C,d6
@@ -16869,7 +16737,7 @@ C98E6:
 	beq.b	C9906
 	cmp	#$C500,d0
 	beq.b	C991A
-	br	HandleMacroos
+	br	HandleMacros
 
 C9906:
 	move	(a3)+,d0
@@ -16878,7 +16746,7 @@ C9906:
 	beq.b	C991A
 	cmp	#$CC00,d0
 	beq.b	C9922
-	br	HandleMacroos
+	br	HandleMacros
 
 C991A:
 	move	#$F28B,d6
@@ -16895,7 +16763,7 @@ C992A:
 	beq.b	C993E
 	cmp	#$CC00,d0
 	beq.b	C9946
-	br	HandleMacroos
+	br	HandleMacros
 
 C993E:
 	move	#$F28A,d6
@@ -16912,7 +16780,7 @@ C994E:
 	beq.b	C9962
 	cmp	#$D100,d0
 	beq.b	C9976
-	br	HandleMacroos
+	br	HandleMacros
 
 C9962:
 	move	(a3)+,d0
@@ -16921,7 +16789,7 @@ C9962:
 	beq.b	C9976
 	cmp	#$CC00,d0
 	beq.b	C997E
-	br	HandleMacroos
+	br	HandleMacros
 
 C9976:
 	move	#$F289,d6
@@ -16938,7 +16806,7 @@ C9986:
 	beq.b	C999A
 	cmp	#$C04C,d0
 	beq.b	C99A2
-	br	HandleMacroos
+	br	HandleMacros
 
 C999A:
 	move	#$F288,d6
@@ -16955,7 +16823,7 @@ C99AA:
 	beq.b	C99BE
 	cmp	#$C04C,d0
 	beq.b	C99C6
-	br	HandleMacroos
+	br	HandleMacros
 
 C99BE:
 	move	#$F287,d6
@@ -16976,7 +16844,7 @@ C99CE:
 	beq.b	C9A26
 	cmp	#$4540,d0
 	beq.b	C9A12
-	br	HandleMacroos
+	br	HandleMacros
 
 C99EE:
 	move	(a3)+,d0
@@ -16985,7 +16853,7 @@ C99EE:
 	beq.b	C9A02
 	cmp	#$CC00,d0
 	beq.b	C9A0A
-	br	HandleMacroos
+	br	HandleMacros
 
 C9A02:
 	move	#$F284,d6
@@ -17002,7 +16870,7 @@ C9A12:
 	beq.b	C9A26
 	cmp	#$CC00,d0
 	beq.b	C9A2E
-	br	HandleMacroos
+	br	HandleMacros
 
 C9A26:
 	move	#$F285,d6
@@ -17027,7 +16895,7 @@ C9A36:
 	beq.b	C9A8C
 	cmp	#$4C40,d0
 	beq	C9AB0
-	br	HandleMacroos
+	br	HandleMacros
 
 C9A68:
 	move	(a3)+,d0
@@ -17036,7 +16904,7 @@ C9A68:
 	beq.b	C9A7C
 	cmp	#$CC00,d0
 	beq.b	C9A84
-	br	HandleMacroos
+	br	HandleMacros
 
 C9A7C:
 	move	#$F282,d6
@@ -17053,7 +16921,7 @@ C9A8C:
 	beq.b	C9AA0
 	cmp	#$CC00,d0
 	beq.b	C9AA8
-	br	HandleMacroos
+	br	HandleMacros
 
 C9AA0:
 	move	#$F283,d6
@@ -17070,7 +16938,7 @@ C9AB0:
 	beq.b	C9AC4
 	cmp	#$CC00,d0
 	beq.b	C9ACC
-	br	HandleMacroos
+	br	HandleMacros
 
 C9AC4:
 	move	#$F286,d6
@@ -17087,7 +16955,7 @@ C9AD4:
 	beq.b	C9AE8
 	cmp	#$C04C,d0
 	beq.b	C9AF0
-	br	HandleMacroos
+	br	HandleMacros
 
 C9AE8:
 	move	#$F28E,d6
@@ -17104,7 +16972,7 @@ C9AF8:
 	beq.b	C9B0C
 	cmp	#$C04C,d0
 	beq.b	C9B14
-	br	HandleMacroos
+	br	HandleMacros
 
 C9B0C:
 	move	#$F281,d6
@@ -17121,7 +16989,7 @@ C9B1C:
 	beq.b	C9B30
 	cmp	#$CC00,d0
 	beq.b	C9B38
-	br	HandleMacroos
+	br	HandleMacros
 
 C9B30:
 	move	#$F280,d6
@@ -17138,7 +17006,7 @@ C9B40:
 	beq.b	C9B54
 	cmp	#$CC00,d0
 	beq.b	C9B5C
-	br	HandleMacroos
+	br	HandleMacros
 
 C9B54:
 	move	#$F28F,d6
@@ -17167,7 +17035,7 @@ C9B64:
 	beq	C9CE0
 	cmp	#$5441,d0
 	beq.b	C9BAA
-	br	HandleMacroos
+	br	HandleMacros
 
 C9BAA:
 	move	(a3)+,d0
@@ -17180,7 +17048,7 @@ C9BAA:
 	beq	C9C40
 	cmp	#$4E48,d0
 	beq.b	C9BD0
-	br	HandleMacroos
+	br	HandleMacros
 
 C9BD0:
 	move	(a3)+,d0
@@ -17199,7 +17067,7 @@ C9BD0:
 	beq.b	C9C40
 	cmp	#$C050,d0
 	beq	C9C4C
-	br	HandleMacroos
+	br	HandleMacros
 
 C9C04:
 	move.l	#$000DF200,d6
@@ -17297,7 +17165,7 @@ C9CE0:
 	beq	C9D66
 	cmp	#$4E40,d0
 	beq.b	C9CF6
-	br	HandleMacroos
+	br	HandleMacros
 
 C9CF6:
 	move	(a3)+,d0
@@ -17370,7 +17238,7 @@ C9D7E:
 	beq.b	C9DEC
 	cmp	#$C050,d0
 	beq.b	C9DF8
-	br	HandleMacroos
+	br	HandleMacros
 
 C9DB0:
 	move.l	#$0022F200,d6
@@ -17414,7 +17282,7 @@ C9E04:
 	beq.b	C9E86
 	cmp	#$5340,d0
 	beq.b	C9E18
-	br	HandleMacroos
+	br	HandleMacros
 
 C9E18:
 	move	(a3)+,d0
@@ -17527,14 +17395,14 @@ C9F18:
 AsmG:
 	cmp	#'GL',d0
 	beq.b	C9F3C
-	br	HandleMacroos
+	br	HandleMacros
 
 C9F3C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"OB",d0
 	beq.b	C9F4A
-	br	HandleMacroos
+	br	HandleMacros
 
 C9F4A:
 	move	(a3)+,d0
@@ -17543,21 +17411,21 @@ C9F4A:
 	beq	CD778
 	cmp	#"AL"+$8000,d0
 	beq	CD778
-	br	HandleMacroos
+	br	HandleMacros
 
 ;************* H *************************
 
 AsmH:
 	cmp.w	#'HA',d0	;HAlt
 	beq.s	asm_HAlt
-	br	HandleMacroos
+	br	HandleMacros
 
 asm_HAlt:
 	move.w	(a3)+,d0
 	and	d4,d0
 	cmp.w	#"LT"!$8000,d0
 	beq.s	asm_HALT_done
-	br	HandleMacroos
+	br	HandleMacros
 
 asm_HALT_done:
 	moveq	#PB_060,d0		;060
@@ -17582,28 +17450,28 @@ AsmI:
 	beq.b	C9F90
 	cmp	#"ID",d0	;ID 
 	beq.b	C9FAE
-	br	HandleMacroos
+	br	HandleMacros
 
 C9F90:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"AG",d0
 	beq.b	C9F9E
-	br	HandleMacroos
+	br	HandleMacros
 
 C9F9E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C500,d0
 	beq	IncBinStuff
-	br	HandleMacroos
+	br	HandleMacros
 
 C9FAE:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"NT"+$8000,d0
 	beq	CD880
-	br	HandleMacroos
+	br	HandleMacros
 
 AsmINstuff:
 	move	(a3)+,d0
@@ -17618,7 +17486,7 @@ AsmINstuff:
 	beq.b	C9FF4
 	cmp	#"CI",d0	;inCIff
 	beq.b	AsmIncIFF
-	br	HandleMacroos
+	br	HandleMacros
 
 ;*********** INC IFF STUFF *************
 
@@ -17629,7 +17497,7 @@ AsmIncIFF:
 	beq	AsmIncIFFOK
 	cmp	#"FF",d0	;inciFFp
 	BEQ.S	checkINCIFFP
-	br	HandleMacroos
+	br	HandleMacros
 
 checkINCIFFP:
 	move	(A3)+,D0
@@ -17642,7 +17510,7 @@ checkINCIFFP:
 	bne.s	.no
 	jmp	IncIFFStrip
 .no:
-	bra	HandleMacroos
+	bra	HandleMacros
 
 ;***************************************
 
@@ -17650,7 +17518,7 @@ C9FF4:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D243,d0
-	bne	HandleMacroos
+	bne	HandleMacros
 	br	CE66E
 
 CA004:
@@ -17658,7 +17526,7 @@ CA004:
 	and	d4,d0
 	cmp	#$C94E,d0
 	beq	IncBinStuff
-	br	HandleMacroos
+	br	HandleMacros
 
 CA014:
 	move	(a3)+,d0
@@ -17667,49 +17535,49 @@ CA014:
 	beq.b	check_INCLUD
 	cmp	#'IN',d0
 	beq.b	check_INCLIN
-	br	HandleMacroos
+	br	HandleMacros
 
 check_INCLUD:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C500,d0	;includE
 	beq	Asm_Include
-	br	HandleMacroos
+	br	HandleMacros
 
 check_INCLIN:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CB00,d0	;inclinK
 	beq	Asm_IncLink
-	br	HandleMacroos
+	br	HandleMacros
 
 CA032:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C952,d0
 	beq	CE61A
-	br	HandleMacroos
+	br	HandleMacros
 
 CA042:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$4C45,d0
 	beq.b	CA050
-	br	HandleMacroos
+	br	HandleMacros
 
 CA050:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$4741,d0
 	beq.b	CA05E
-	br	HandleMacroos
+	br	HandleMacros
 
 CA05E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CC00,d0
 	beq.b	CA06C
-	br	HandleMacroos
+	br	HandleMacros
 
 CA06C:
 	move	#$4AFC,d6
@@ -17747,7 +17615,7 @@ CA078:
 	beq	CE49A
 	cmp	#$9100,d0	;IF1
 	beq	CE490
-	br	HandleMacroos
+	br	HandleMacros
 
 AsmJ:
 	cmp	#'JS',d0
@@ -17756,14 +17624,14 @@ AsmJ:
 	beq.b	Asm_JM
 	cmp	#'JU',d0
 	beq.b	CA106
-	br	HandleMacroos
+	br	HandleMacros
 
 CA106:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"MP",d0
 	beq.b	CA114
-	br	HandleMacroos
+	br	HandleMacros
 
 CA114:
 	move	(a3)+,d0
@@ -17772,35 +17640,35 @@ CA114:
 	beq.b	CA138
 	cmp	#"ER",d0
 	beq.b	CA128
-	br	HandleMacroos
+	br	HandleMacros
 
 CA128:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D200,d0
 	beq	CD6D8
-	br	HandleMacroos
+	br	HandleMacros
 
 CA138:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D200,d0
 	beq	CD6D0
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_JS:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D200,d0
 	beq.b	Asm_JSR
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_JM:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D000,d0
 	beq.b	Asm_JMP
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_JSR:
 	move	#$4E80,d6
@@ -17828,18 +17696,18 @@ AsmL:
 	beq.b	CA1A2
 	cmp.w	#'LP',d0	;LPstop
 	beq.s	asm_lpstop1
-	br	HandleMacroos
+	br	HandleMacros
 
 asm_lpstop1:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#'ST',d0	;lpSTop
-	bne	HandleMacroos
+	bne	HandleMacros
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#'OP'!$8000,d0	;lpstOP
 	beq	asm_lpstop2
-	br	HandleMacroos
+	br	HandleMacros
 
 asm_lpstop2:
 	moveq	#PB_060,d0
@@ -17855,7 +17723,7 @@ CA1A2:
 	and	d4,d0
 	cmp	#$C54E,d0
 	beq	CD81E
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_LE:
 	move	(a3)+,d0
@@ -17864,7 +17732,7 @@ Asm_LE:
 	beq.b	asm_LEA
 	cmp	#$4140,d0
 	beq.b	CA1C6
-	br	HandleMacroos
+	br	HandleMacros
 
 CA1C6:
 	move	(a3)+,d0
@@ -17875,7 +17743,7 @@ CA1C6:
 	beq.b	asm_LEA
 	cmp	#$C200,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 asm_LEA:
 	move	#$41C0,d6
@@ -17893,7 +17761,7 @@ CA1F0:
 	beq.b	CA210
 	cmp	#$4C40,d0
 	beq.b	CA22A
-	br	HandleMacroos
+	br	HandleMacros
 
 CA210:
 	move	(a3)+,d0
@@ -17904,7 +17772,7 @@ CA210:
 	beq.b	CA290
 	cmp	#$C200,d0
 	beq.b	CA27C
-	br	HandleMacroos
+	br	HandleMacros
 
 CA22A:
 	move	(a3)+,d0
@@ -17915,7 +17783,7 @@ CA22A:
 	beq.b	CA264
 	cmp	#$C200,d0
 	beq.b	CA250
-	br	HandleMacroos
+	br	HandleMacros
 
 CA244:
 	move	#$E3C8,d6
@@ -17968,7 +17836,7 @@ CA29C:
 	beq.b	CA2BE
 	cmp	#$D354,d0
 	beq	CD812
-	br	HandleMacroos
+	br	HandleMacros
 
 CA2BE:
 	move	(a3)+,d0
@@ -17979,7 +17847,7 @@ CA2BE:
 	beq	CA306
 	cmp	#$C042,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 CA2DC:
 	move	(a3)+,d0
@@ -17992,7 +17860,7 @@ CA2DC:
 	beq.b	Asm_LineF
 	cmp	#$C100,d0
 	beq.b	Asm_LineA
-	br	HandleMacroos
+	br	HandleMacros
 
 CA2FC:
 	move	#$4E50,d6
@@ -18021,7 +17889,7 @@ CA330:
 	and	d4,d0
 	cmp	#$C144,d0
 	beq	CD920
-	br	HandleMacroos
+	br	HandleMacros
 
 AsmM:
 ;******* TRYOUT SPEED IMPROVEMENT *******
@@ -18046,21 +17914,21 @@ AsmM:
 	cmp	#'ME',d0
 CA35A:
 	beq.b	CA360
-	br	HandleMacroos
+	br	HandleMacros
 
 CA360:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"XI",d0	'XI
 	beq.b	CA36E
-	br	HandleMacroos
+	br	HandleMacros
 
 CA36E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"T"<<(1*8)+$8000,d0
 	beq	CE44C
-	br	HandleMacroos
+	br	HandleMacros
 
 ;asm_IsIt_Move:
 ;	move	(a3)+,d0
@@ -18069,7 +17937,7 @@ CA36E:
 ;	beq.b	Asm_its_MOVE_somthing
 ;	cmp	#"VE"+$8000,d0
 ;	beq	Asm_its_MOVE
-;	br	HandleMacroos
+;	br	HandleMacros
 
 Asm_its_MOVE_somthing:
 	move	(a3)+,d0
@@ -18104,7 +17972,7 @@ Asm_its_MOVE_somthing:
 	beq.b	CA416
 	cmp	#$9116,d0
 	beq.b	Asm_Move16
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_Move16:
 ;	moveq	#PB_040,d0		;040+
@@ -18122,7 +17990,7 @@ CA416:
 	beq.b	CA430
 	cmp	#"B"<<(1*8)+$8000,d0
 	beq.b	CA43A
-	br	HandleMacroos
+	br	HandleMacros
 
 CA430:
 	move	#$0E40,d6
@@ -18152,7 +18020,7 @@ CA456:
 	beq.b	CA474
 	cmp	#$C200,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 CA474:
 	move	#$7000,d6
@@ -18168,7 +18036,7 @@ CA480:
 	beq	CA4AA
 	cmp	#$C200,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 CA4A0:
 	move	#$0108,d6
@@ -18189,7 +18057,7 @@ CA4B6:
 	beq.b	CA4DC
 	cmp	#$C200,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 CA4D2:
 	move	#$4880,d6
@@ -18210,7 +18078,7 @@ CA4E8:
 	beq.b	CA538
 	cmp	#$C200,d0
 	beq	ERROR_IllegalSize
-	br	HandleMacroos
+	br	HandleMacros
 
 CA504:
 	moveq	#0,d6
@@ -18247,21 +18115,21 @@ CA542:
 	beq.b	CA566
 	cmp	#$534B,d0
 	beq.b	CA556
-	br	HandleMacroos
+	br	HandleMacros
 
 CA556:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$9200,d0
 	beq	CD888
-	br	HandleMacroos
+	br	HandleMacros
 
 CA566:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CF00,d0
 	beq	GoGoMacro
-	br	HandleMacroos
+	br	HandleMacros
 
 CA576:	;asm_MU
 	move	(a3)+,d0
@@ -18274,7 +18142,7 @@ CA576:	;asm_MU
 	beq.b	CA596
 	cmp	#'LS',d0	;muLS
 	beq.b	CA5AA
-	br	HandleMacroos
+	br	HandleMacros
 
 CA596:
 	move	(a3)+,d0
@@ -18283,7 +18151,7 @@ CA596:
 	beq.b	CA5BE
 	cmp	#"@L"+$8000,d0	;mulu.L
 	beq.b	CA5C8
-	br	HandleMacroos
+	br	HandleMacros
 
 CA5AA:
 	move	(a3)+,d0
@@ -18292,7 +18160,7 @@ CA5AA:
 	beq.b	CA5D4
 	cmp	#"@L"+$8000,d0
 	beq.b	CA5DE
-	br	HandleMacroos
+	br	HandleMacros
 
 CA5BE:
 	move	#$C0C0,d6
@@ -18321,7 +18189,7 @@ AsmN:
 	beq	CA698
 	cmp	#'NB',d0
 	beq	CA72C
-	br	HandleMacroos
+	br	HandleMacros
 
 CA604:
 	move	(a3)+,d0
@@ -18338,7 +18206,7 @@ CA604:
 	beq.b	CA658
 	cmp	#"L"<<(1*8)+$8000,d0
 	beq	CD818
-	br	HandleMacroos
+	br	HandleMacros
 
 CA632:
 	move	#$4E71,d6
@@ -18354,21 +18222,21 @@ CA63E:
 	beq.b	CA68C
 	cmp	#$C200,d0
 	beq.b	CA678
-	br	HandleMacroos
+	br	HandleMacros
 
 CA658:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"GE"+$8000,d0
 	beq	CD808
-	br	HandleMacroos
+	br	HandleMacros
 
 CA668:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"ST"+$8000,d0
 	beq	CD818
-	br	HandleMacroos
+	br	HandleMacros
 
 CA678:
 	move	#$4600,d6
@@ -18396,7 +18264,7 @@ CA698:
 	beq.b	CA6F6
 	cmp	#$C758,d0
 	beq.b	CA716
-	br	HandleMacroos
+	br	HandleMacros
 
 CA6B8:
 	move	(a3)+,d0
@@ -18407,7 +18275,7 @@ CA6B8:
 	beq.b	CA6EC
 	cmp	#$CC00,d0
 	beq.b	CA700
-	br	HandleMacroos
+	br	HandleMacros
 
 CA6D2:
 	move	(a3)+,d0
@@ -18418,7 +18286,7 @@ CA6D2:
 	beq.b	CA70C
 	cmp	#$C04C,d0
 	beq.b	CA720
-	br	HandleMacroos
+	br	HandleMacros
 
 CA6EC:
 	move	#$4400,d6
@@ -18457,7 +18325,7 @@ CA72C:
 	beq.b	CA75E
 	cmp	#$4344,d0
 	beq.b	CA740
-	br	HandleMacroos
+	br	HandleMacros
 
 CA740:
 	move	(a3)+,d0
@@ -18468,7 +18336,7 @@ CA740:
 	beq	ERROR_IllegalSize
 	cmp	#$C042,d0
 	beq.b	CA75E
-	br	HandleMacroos
+	br	HandleMacros
 
 CA75E:
 	move	#$4800,d6
@@ -18476,34 +18344,34 @@ CA75E:
 	br	C108B6
 
 CondAsmTab2:
-	dc.w	_HandleMacroos-CondAsmTab2	;@
-	dc.w	_HandleMacroos-CondAsmTab2	;A
-	dc.w	_HandleMacroos-CondAsmTab2	;B
-	dc.w	_HandleMacroos-CondAsmTab2	;C
-	dc.w	_HandleMacroos-CondAsmTab2	;D
+	dc.w	_HandleMacros-CondAsmTab2	;@
+	dc.w	_HandleMacros-CondAsmTab2	;A
+	dc.w	_HandleMacros-CondAsmTab2	;B
+	dc.w	_HandleMacros-CondAsmTab2	;C
+	dc.w	_HandleMacros-CondAsmTab2	;D
 	dc.w	CondAsmE-CondAsmTab2		;E
-	dc.w	_HandleMacroos-CondAsmTab2	;F
-	dc.w	_HandleMacroos-CondAsmTab2	;G
-	dc.w	_HandleMacroos-CondAsmTab2	;H
+	dc.w	_HandleMacros-CondAsmTab2	;F
+	dc.w	_HandleMacros-CondAsmTab2	;G
+	dc.w	_HandleMacros-CondAsmTab2	;H
 	dc.w	CondAsmI-CondAsmTab2		;I
-	dc.w	_HandleMacroos-CondAsmTab2	;J
-	dc.w	_HandleMacroos-CondAsmTab2	;K
-	dc.w	_HandleMacroos-CondAsmTab2	;L
+	dc.w	_HandleMacros-CondAsmTab2	;J
+	dc.w	_HandleMacros-CondAsmTab2	;K
+	dc.w	_HandleMacros-CondAsmTab2	;L
 	dc.w	CondAsmM-CondAsmTab2		;M
-	dc.w	_HandleMacroos-CondAsmTab2	;N
-	dc.w	_HandleMacroos-CondAsmTab2	;O
-	dc.w	_HandleMacroos-CondAsmTab2	;P
-	dc.w	_HandleMacroos-CondAsmTab2	;Q
-	dc.w	_HandleMacroos-CondAsmTab2	;R
-	dc.w	_HandleMacroos-CondAsmTab2	;S
-	dc.w	_HandleMacroos-CondAsmTab2	;T
-	dc.w	_HandleMacroos-CondAsmTab2	;U
-	dc.w	_HandleMacroos-CondAsmTab2	;V
-	dc.w	_HandleMacroos-CondAsmTab2	;W
-	dc.w	_HandleMacroos-CondAsmTab2	;X
-	dc.w	_HandleMacroos-CondAsmTab2	;Y
-	dc.w	_HandleMacroos-CondAsmTab2	;Z
-	dc.w	_HandleMacroos-CondAsmTab2	;[
+	dc.w	_HandleMacros-CondAsmTab2	;N
+	dc.w	_HandleMacros-CondAsmTab2	;O
+	dc.w	_HandleMacros-CondAsmTab2	;P
+	dc.w	_HandleMacros-CondAsmTab2	;Q
+	dc.w	_HandleMacros-CondAsmTab2	;R
+	dc.w	_HandleMacros-CondAsmTab2	;S
+	dc.w	_HandleMacros-CondAsmTab2	;T
+	dc.w	_HandleMacros-CondAsmTab2	;U
+	dc.w	_HandleMacros-CondAsmTab2	;V
+	dc.w	_HandleMacros-CondAsmTab2	;W
+	dc.w	_HandleMacros-CondAsmTab2	;X
+	dc.w	_HandleMacros-CondAsmTab2	;Y
+	dc.w	_HandleMacros-CondAsmTab2	;Z
+	dc.w	_HandleMacros-CondAsmTab2	;[
 
 AsmO:
 	cmp	#'OR',d0
@@ -18514,14 +18382,14 @@ AsmO:
 	beq.b	CA7BE
 	cmp	#'OF',d0
 	beq.b	CA7CE
-	br	HandleMacroos
+	br	HandleMacros
 
 CA7BE:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"D"<<(1*8)+$8000,d0
 	beq	CD952
-	br	HandleMacroos
+	br	HandleMacros
 
 CA7CE:
 	move	(a3)+,d0
@@ -18530,14 +18398,14 @@ CA7CE:
 	beq.b	CA7E4
 	cmp	#"S"<<(1*8)+$8000,d0
 	beq	CE74A
-	br	HandleMacroos
+	br	HandleMacros
 
 CA7E4:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"ET"+$8000,d0
 	beq	CE74A
-	br	HandleMacroos
+	br	HandleMacros
 
 CA7F4:
 	move	(a3)+,d0
@@ -18554,7 +18422,7 @@ CA7F4:
 	beq.b	CA822
 	cmp	#"I"<<(1*8)+$8000,d0
 	beq.b	CA846
-	br	HandleMacroos
+	br	HandleMacros
 
 CA822:
 	move	(a3)+,d0
@@ -18565,7 +18433,7 @@ CA822:
 	beq.b	CA83C
 	cmp	#$CC00,d0
 	beq.b	CA850
-	br	HandleMacroos
+	br	HandleMacros
 
 CA83C:
 	move	#$8001,d6
@@ -18607,21 +18475,21 @@ AsmP:
 	beq	CB7F6
 	cmp	#'PU',d0
 	beq	asm_pulse1
-	br	HandleMacroos
+	br	HandleMacros
 
 asm_pulse1:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#'LS',d0	;puLSe
 	beq	asm_pulse2
-	br	HandleMacroos
+	br	HandleMacros
 
 asm_pulse2:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"E"<<(1*8)+$8000,d0	;pulsE
 	beq.s	asm_pulse3
-	br	HandleMacroos
+	br	HandleMacros
 
 asm_pulse3:
 	moveq	#PB_060,d0		;060
@@ -18637,7 +18505,7 @@ AsmP_PM:
 	and	d4,d0
 	cmp	#"OV",d0	;PMOV
 	beq.b	AsmP_PMOV
-	br	HandleMacroos
+	br	HandleMacros
 
 
 ;SYNOPSIS
@@ -18656,7 +18524,7 @@ AsmP_PMOV:
 	beq.b	AsmP_PMOVE
 	cmp	#"EF",d0	;PMOVEF
 	beq.b	AsmP_PMOVEF
-	br	HandleMacroos
+	br	HandleMacros
 
 AsmP_PMOVE_:
 	move	(a3)+,d0
@@ -18671,7 +18539,7 @@ AsmP_PMOVE_:
 	beq.b	AsmP_PMOVED
 	cmp	#$D100,d0	;PMOVE.Q
 	beq.b	AsmP_PMOVED
-	br	HandleMacroos
+	br	HandleMacros
 
 AsmP_PMOVEF:
 	move	(a3)+,d0
@@ -18680,7 +18548,7 @@ AsmP_PMOVEF:
 	beq.b	AsmP_PMOVEFD_
 	cmp	#$C400,d0	;PMOVEFD
 	beq.b	AsmP_PMOVEFD
-	br	HandleMacroos
+	br	HandleMacros
 
 AsmP_PMOVEFD_:
 	move	(a3)+,d0
@@ -18691,7 +18559,7 @@ AsmP_PMOVEFD_:
 	beq.b	AsmP_PMOVEFDQ
 	cmp	#$D100,d0	;PMOVEFD.Q
 	beq.b	AsmP_PMOVEFDQ
-	br	HandleMacroos
+	br	HandleMacros
 
 AsmP_PMOVEB:
 	move.l	#$F0004000,d6	;For CRP, SRP, TC registers
@@ -18722,14 +18590,14 @@ CA96E:
 	and	d4,d0
 	cmp	#$414C,d0
 	beq.b	CA97C
-	br	HandleMacroos
+	br	HandleMacros
 
 CA97C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C944,d0
 	beq.b	CA98A
-	br	HandleMacroos
+	br	HandleMacros
 
 CA98A:
 	move.l	#$F0002800,d6
@@ -18742,7 +18610,7 @@ CA994:
 	beq	Asm_PTES
 	cmp	#$5241,d0	;ptRA
 	beq.b	CA9AA
-	br	HandleMacroos
+	br	HandleMacros
 
 CA9AA:
 	move	(a3)+,d0
@@ -18763,7 +18631,7 @@ CA9AA:
 	beq	CABE8
 	cmp	#$5043,d0
 	beq	CAC3C
-	br	HandleMacroos
+	br	HandleMacros
 
 CA9F0:
 	move	(a3)+,d0
@@ -18776,7 +18644,7 @@ CA9F0:
 	beq.b	CAA14
 	cmp	#$4340,d0
 	beq.b	CAA2C
-	br	HandleMacroos
+	br	HandleMacros
 
 CAA14:
 	move	(a3)+,d0
@@ -18807,7 +18675,7 @@ CAA44:
 	beq.b	CAA68
 	cmp	#$4340,d0
 	beq.b	CAA80
-	br	HandleMacroos
+	br	HandleMacros
 
 CAA68:
 	move	(a3)+,d0
@@ -18838,7 +18706,7 @@ CAA98:
 	beq.b	CAABC
 	cmp	#$4340,d0
 	beq.b	CAAD4
-	br	HandleMacroos
+	br	HandleMacros
 
 CAABC:
 	move	(a3)+,d0
@@ -18869,7 +18737,7 @@ CAAEC:
 	beq.b	CAB10
 	cmp	#$4340,d0
 	beq.b	CAB28
-	br	HandleMacroos
+	br	HandleMacros
 
 CAB10:
 	move	(a3)+,d0
@@ -18900,7 +18768,7 @@ CAB40:
 	beq.b	CAB64
 	cmp	#$4340,d0
 	beq.b	CAB7C
-	br	HandleMacroos
+	br	HandleMacros
 
 CAB64:
 	move	(a3)+,d0
@@ -18931,7 +18799,7 @@ CAB94:
 	beq.b	CABB8
 	cmp	#$4340,d0
 	beq.b	CABD0
-	br	HandleMacroos
+	br	HandleMacros
 
 CABB8:
 	move	(a3)+,d0
@@ -18962,7 +18830,7 @@ CABE8:
 	beq.b	CAC0C
 	cmp	#$4340,d0
 	beq.b	CAC24
-	br	HandleMacroos
+	br	HandleMacros
 
 CAC0C:
 	move	(a3)+,d0
@@ -18993,7 +18861,7 @@ CAC3C:
 	beq.b	CAC60
 	cmp	#$4340,d0
 	beq.b	CAC78
-	br	HandleMacroos
+	br	HandleMacros
 
 CAC60:
 	move	(a3)+,d0
@@ -19260,7 +19128,7 @@ Asm_PTES:
 	beq.b	CAFA4
 	cmp	#$D457,d0	;TW
 	beq.b	CAFAE
-	br	HandleMacroos
+	br	HandleMacros
 
 CAFA4:
 	move.l	#$F0008200,d6
@@ -19275,7 +19143,7 @@ Asm_PF:
 	and	d4,d0
 	cmp	#"LU",d0
 	beq.b	Asm_PFLU
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_PFLU:
 	move	(a3)+,d0
@@ -19284,7 +19152,7 @@ Asm_PFLU:
 	beq.b	Asm_PFLUSH_
 	cmp	#"SH",d0
 	beq.b	Asm_PFLUSH
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_PFLUSH:
 	move	(a3)+,d0
@@ -19299,7 +19167,7 @@ Asm_PFLUSH:
 	beq	Asm_PFLUSHR
 	cmp	#$C14E,d0
 	beq.b	Asm_PFLUSHAN
-	br	HandleMacroos
+	br	HandleMacros
 
 Asm_PFLUSH_:
 	move.l	#$F0003000,d6
@@ -19365,7 +19233,7 @@ CB054:
 	beq	CB122
 	cmp	#$4243,d0
 	beq	CB13A
-	jmp	HandleMacroos
+	jmp	HandleMacros
 
 CB092:
 	move	(a3)+,d0
@@ -19374,7 +19242,7 @@ CB092:
 	beq	CB152
 	cmp	#$C300,d0
 	beq	CB15C
-	jmp	HandleMacroos
+	jmp	HandleMacros
 
 CB0AA:
 	move	(a3)+,d0
@@ -19383,7 +19251,7 @@ CB0AA:
 	beq	CB166
 	cmp	#$C300,d0
 	beq	CB170
-	jmp	HandleMacroos
+	jmp	HandleMacros
 
 CB0C2:
 	move	(a3)+,d0
@@ -19392,7 +19260,7 @@ CB0C2:
 	beq	CB18E
 	cmp	#$C300,d0
 	beq	CB198
-	jmp	HandleMacroos
+	jmp	HandleMacros
 
 CB0DA:
 	move	(a3)+,d0
@@ -19401,7 +19269,7 @@ CB0DA:
 	beq	CB17A
 	cmp	#$C300,d0
 	beq	CB184
-	jmp	HandleMacroos
+	jmp	HandleMacros
 
 CB0F2:
 	move	(a3)+,d0
@@ -19410,7 +19278,7 @@ CB0F2:
 	beq	CB1A2
 	cmp	#$C300,d0
 	beq	CB1AC
-	jmp	HandleMacroos
+	jmp	HandleMacros
 
 CB10A:
 	move	(a3)+,d0
@@ -19419,7 +19287,7 @@ CB10A:
 	beq	CB1B6
 	cmp	#$C300,d0
 	beq	CB1C0
-	jmp	HandleMacroos
+	jmp	HandleMacros
 
 CB122:
 	move	(a3)+,d0
@@ -19428,7 +19296,7 @@ CB122:
 	beq	CB1CA
 	cmp	#$C300,d0
 	beq	CB1D4
-	jmp	HandleMacroos
+	jmp	HandleMacros
 
 CB13A:
 	move	(a3)+,d0
@@ -19437,7 +19305,7 @@ CB13A:
 	beq	CB1DE
 	cmp	#$C300,d0
 	beq	CB1E8
-	jmp	HandleMacroos
+	jmp	HandleMacros
 
 CB152:
 	move.l	#$0000F048,d6
@@ -19570,7 +19438,7 @@ CB1F2:
 	beq	CB45E
 	cmp	#$4343,d0
 	beq	CB478
-	br	_HandleMacroos	;was HandleMacroos
+	br	_HandleMacros	;was HandleMacros
 
 CB2F8:
 	move	(a3)+,d0
@@ -19579,7 +19447,7 @@ CB2F8:
 	beq	CB492
 	cmp	#$C04C,d0
 	beq	CB49C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB310:
 	move	(a3)+,d0
@@ -19588,7 +19456,7 @@ CB310:
 	beq	CB4A8
 	cmp	#$C04C,d0
 	beq	CB4B2
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB328:
 	move	(a3)+,d0
@@ -19597,7 +19465,7 @@ CB328:
 	beq	CB4BE
 	cmp	#$C04C,d0
 	beq	CB4C8
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB340:
 	move	(a3)+,d0
@@ -19606,7 +19474,7 @@ CB340:
 	beq	CB4D4
 	cmp	#$C04C,d0
 	beq	CB4DE
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB35A:
 	move	(a3)+,d0
@@ -19615,7 +19483,7 @@ CB35A:
 	beq	CB4EA
 	cmp	#$C04C,d0
 	beq	CB4F4
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB374:
 	move	(a3)+,d0
@@ -19624,7 +19492,7 @@ CB374:
 	beq	CB500
 	cmp	#$C04C,d0
 	beq	CB50A
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB38E:
 	move	(a3)+,d0
@@ -19633,7 +19501,7 @@ CB38E:
 	beq	CB516
 	cmp	#$C04C,d0
 	beq	CB520
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB3A8:
 	move	(a3)+,d0
@@ -19642,7 +19510,7 @@ CB3A8:
 	beq	CB52C
 	cmp	#$C04C,d0
 	beq	CB536
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB3C2:
 	move	(a3)+,d0
@@ -19651,7 +19519,7 @@ CB3C2:
 	beq	CB542
 	cmp	#$C04C,d0
 	beq	CB54C
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB3DC:
 	move	(a3)+,d0
@@ -19660,7 +19528,7 @@ CB3DC:
 	beq	CB558
 	cmp	#$C04C,d0
 	beq	CB562
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB3F6:
 	move	(a3)+,d0
@@ -19669,7 +19537,7 @@ CB3F6:
 	beq	CB56E
 	cmp	#$C04C,d0
 	beq	CB578
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB410:
 	move	(a3)+,d0
@@ -19678,7 +19546,7 @@ CB410:
 	beq	CB584
 	cmp	#$C04C,d0
 	beq	CB58E
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB42A:
 	move	(a3)+,d0
@@ -19687,7 +19555,7 @@ CB42A:
 	beq	CB59A
 	cmp	#$C04C,d0
 	beq	CB5A4
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB444:
 	move	(a3)+,d0
@@ -19696,7 +19564,7 @@ CB444:
 	beq	CB5B0
 	cmp	#$C04C,d0
 	beq	CB5BA
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB45E:
 	move	(a3)+,d0
@@ -19705,7 +19573,7 @@ CB45E:
 	beq	CB5C6
 	cmp	#$C04C,d0
 	beq	CB5D0
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB478:
 	move	(a3)+,d0
@@ -19714,7 +19582,7 @@ CB478:
 	beq	CB5DC
 	cmp	#$C04C,d0
 	beq	CB5E6
-	jmp	(HandleMacroos).l
+	jmp	(HandleMacros).l
 
 CB492:
 	move	#$F080,d6
@@ -19883,21 +19751,21 @@ Asm_PR:
 	beq.b	Asm_PRIN
 	cmp	#"ES",d0
 	beq.b	CB606
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB606:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$544F,d0
 	beq.b	CB614
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB614:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D245,d0
 	beq.b	CB622
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB622:
 	move	#$F140,d6
@@ -19910,7 +19778,7 @@ Asm_PRIN:
 	beq	CD4F0
 	cmp	#$D454,d0	;prinTT
 	beq	Asm_PRINTT
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB642:
 	move	(a3)+,d0
@@ -19949,7 +19817,7 @@ CB642:
 	beq	CB75A
 	cmp	#$C343,d0
 	beq	CB764
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB6CE:
 	move.l	#$F0400000,d6
@@ -20020,7 +19888,7 @@ CB76E:
 	and	d4,d0
 	cmp	#$C500,d0
 	beq.b	CB77C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB77C:
 	move	#$F100,d6
@@ -20033,7 +19901,7 @@ CB784:
 	beq	CB816
 	cmp	#$4140,d0
 	beq.b	CB79A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB79A:
 	move	(a3)+,d0
@@ -20044,7 +19912,7 @@ CB79A:
 	beq.b	CB816
 	cmp	#$C200,d0
 	beq	ERROR_IllegalSize
-	br	_HandleMacroos
+	br	_HandleMacros
 
 Asm_PL:
 	move	(a3)+,d0
@@ -20053,7 +19921,7 @@ Asm_PL:
 	beq	CD83A
 	cmp	#$4F41,d0
 	beq.b	Asm_plOA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 Asm_plOA:
 	move	(a3)+,d0
@@ -20062,7 +19930,7 @@ Asm_plOA:
 	beq.b	Asm_ploadr
 	cmp	#$C457,d0
 	beq.b	Asm_ploadw
-	br	_HandleMacroos
+	br	_HandleMacros
 
 Asm_ploadr:
 	move.l	#$F0002200,d6
@@ -20079,7 +19947,7 @@ CB7F6:
 	beq	CD7FA
 	cmp	#$C34B,d0
 	beq.b	CB80C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB80C:
 	move	#$8140,d6
@@ -20102,7 +19970,7 @@ AsmR:
 	beq	CE702
 	cmp	#'RE',d0
 	beq	CBA78
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB84C:
 	move	(a3)+,d0
@@ -20117,28 +19985,28 @@ CB84C:
 	beq.b	CB896
 	cmp	#"RE",d0
 	beq.b	CB878
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB878:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"SE",d0
 	beq.b	CB886
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB886:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D400,d0
 	beq	CE6E0
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB896:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D400,d0
 	beq	CE6E6
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB8A6:
 	move	(a3)+,d0
@@ -20153,7 +20021,7 @@ CB8A6:
 	beq.b	CB8CC
 	cmp	#$CD00,d0
 	beq.b	CB8DE
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB8CC:
 	move	#$4E74,d6
@@ -20207,7 +20075,7 @@ CB91A:
 	beq.b	CB978
 	cmp	#$D247,d0
 	beq	C7576
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB960:
 	move	#$E7D8,d6
@@ -20238,7 +20106,7 @@ CB990:
 	beq.b	CB9BE
 	cmp	#$C200,d0
 	beq.b	CB9AA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB9AA:
 	move	#$E7D8,d6
@@ -20264,7 +20132,7 @@ CB9CA:
 	beq.b	CB9F8
 	cmp	#$C200,d0
 	beq.b	CB9E4
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CB9E4:
 	move	#$E6D8,d6
@@ -20290,7 +20158,7 @@ CBA04:
 	beq.b	CBA32
 	cmp	#$C042,d0
 	beq.b	CBA1E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBA1E:
 	move	#$E5D0,d6
@@ -20316,7 +20184,7 @@ CBA3E:
 	beq.b	CBA6C
 	cmp	#$C042,d0
 	beq.b	CBA58
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBA58:
 	move	#$E4D0,d6
@@ -20344,14 +20212,14 @@ CBA78:
 	beq.b	CBA9C
 	cmp	#$CD00,d0
 	beq.b	CBAB6
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBA9C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D400,d0
 	beq.b	CBAAA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBAAA:
 	move	#$4E70,d6
@@ -20430,7 +20298,7 @@ AsmS:
 	beq	CBBF8
 	cmp	#"SF"+$8000,d0
 	beq	CBC2A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBB98:
 	move	(a3)+,d0
@@ -20439,7 +20307,7 @@ CBB98:
 	beq.b	CBBCA
 	cmp	#"CD",d0
 	beq.b	CBBAC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBBAC:
 	move	(a3)+,d0
@@ -20450,7 +20318,7 @@ CBBAC:
 	beq	ERROR_IllegalSize
 	cmp	#"@B"+$8000,d0
 	beq.b	CBBCA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBBCA:
 	move	#$8100,d6
@@ -20468,7 +20336,7 @@ CBBD4:
 	beq	ERROR_IllegalSize
 	cmp	#$C042,d0
 	beq.b	CBBF8
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBBF8:
 	move	#$50C0,d6
@@ -20489,7 +20357,7 @@ CBC0C:
 	beq	ERROR_IllegalSize
 	cmp	#"@B"+$8000,d0
 	beq.b	CBC2A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBC2A:
 	move	#$51C0,d6
@@ -20507,7 +20375,7 @@ CBC34:
 	beq.b	CBC72
 	cmp	#$4340,d0
 	beq.b	CBC54
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBC54:
 	move	(a3)+,d0
@@ -20518,7 +20386,7 @@ CBC54:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CBC90
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBC72:
 	move	(a3)+,d0
@@ -20529,7 +20397,7 @@ CBC72:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CBC9A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBC90:
 	move	#$54C0,d6
@@ -20548,14 +20416,14 @@ CBCA4:
 	beq.b	CBCC6
 	cmp	#$4150,d0
 	beq.b	CBCB8
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBCB8:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C057,d0
 	beq.b	CBCC6
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBCC6:
 	move	#'H@',d6
@@ -20585,7 +20453,7 @@ CBCD0:
 	beq	CBDF6
 	cmp	#$C241,d0
 	beq	CBDF6
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBD24:
 	move	(a3)+,d0
@@ -20596,7 +20464,7 @@ CBD24:
 	beq.b	CBD52
 	cmp	#$C042,d0
 	beq.b	CBD3E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBD3E:
 	move	#$5100,d6
@@ -20622,7 +20490,7 @@ CBD5E:
 	beq	CBE00
 	cmp	#$C042,d0
 	beq	ERROR_IllegalSize
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBD7E:
 	move	(a3)+,d0
@@ -20633,7 +20501,7 @@ CBD7E:
 	beq.b	CBDAC
 	cmp	#$C042,d0
 	beq.b	CBD98
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBD98:
 	move	#$9100,d6
@@ -20659,7 +20527,7 @@ CBDB8:
 	beq.b	CBE00
 	cmp	#$C042,d0
 	beq.b	CBDEC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBDD2:
 	move	(a3)+,d0
@@ -20670,7 +20538,7 @@ CBDD2:
 	beq.b	CBE00
 	cmp	#$C200,d0
 	beq.b	CBDEC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBDEC:
 	move	#$9400,d6
@@ -20700,13 +20568,13 @@ Asm_SE:
 	beq.b	CBE2E
 	cmp.w	#"TC",d0	SETCpu
 	beq.s	Asm_Setcp
-	br	_HandleMacroos
+	br	_HandleMacros
 
 Asm_Setcp:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp.w	#"PU"+$8000,d0
-	bne	_HandleMacroos
+	bne	_HandleMacros
 	jmp	m68_ChangeCpuType
 
 CBE2E:
@@ -20718,21 +20586,21 @@ CBE2E:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CBE6A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBE4C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$494F,d0
 	beq.b	CBE5A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBE5A:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CE00,d0
 	beq	CD88C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBE6A:
 	move	#$57C0,d6
@@ -20750,7 +20618,7 @@ CBE74:
 	beq.b	CBEB2
 	cmp	#$4940,d0
 	beq.b	CBE94
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBE94:
 	move	(a3)+,d0
@@ -20761,7 +20629,7 @@ CBE94:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CBEDA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBEB2:
 	move	(a3)+,d0
@@ -20772,7 +20640,7 @@ CBEB2:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CBED0
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBED0:
 	move	#$54C0,d6
@@ -20793,7 +20661,7 @@ CBEE4:
 	beq	CD860
 	cmp	#$4C40,d0
 	beq.b	CBF00
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBF00:
 	move	(a3)+,d0
@@ -20804,7 +20672,7 @@ CBF00:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CBF1E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBF1E:
 	move	#$5AC0,d6
@@ -20822,7 +20690,7 @@ CBF28:
 	beq.b	CBF48
 	cmp	#$4340,d0
 	beq.b	CBF66
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBF48:
 	move	(a3)+,d0
@@ -20833,7 +20701,7 @@ CBF48:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CBF8E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBF66:
 	move	(a3)+,d0
@@ -20844,7 +20712,7 @@ CBF66:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CBF84
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBF84:
 	move	#$58C0,d6
@@ -20875,7 +20743,7 @@ CBF98:
 	beq.b	CC016
 	cmp	#$4540,d0
 	beq.b	CC034
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBFD8:
 	move	(a3)+,d0
@@ -20886,7 +20754,7 @@ CBFD8:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq	CC070
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CBFF8:
 	move	(a3)+,d0
@@ -20897,7 +20765,7 @@ CBFF8:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CC066
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC016:
 	move	(a3)+,d0
@@ -20908,7 +20776,7 @@ CC016:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CC052
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC034:
 	move	(a3)+,d0
@@ -20919,7 +20787,7 @@ CC034:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CC05C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC052:
 	move	#$55C0,d6
@@ -20948,7 +20816,7 @@ CC07A:
 	beq.b	CC0AC
 	cmp	#$4540,d0
 	beq.b	CC08E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC08E:
 	move	(a3)+,d0
@@ -20959,7 +20827,7 @@ CC08E:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CC0AC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC0AC:
 	move	#$56C0,d6
@@ -20973,7 +20841,7 @@ CC0B6:
 	beq.b	CC0E8
 	cmp	#$4940,d0
 	beq.b	CC0CA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC0CA:
 	move	(a3)+,d0
@@ -20984,7 +20852,7 @@ CC0CA:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CC0E8
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC0E8:
 	move	#$5BC0,d6
@@ -21002,7 +20870,7 @@ CC0F2:
 	beq.b	CC130
 	cmp	#$4540,d0
 	beq.b	CC112
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC112:
 	move	(a3)+,d0
@@ -21013,7 +20881,7 @@ CC112:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CC14E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC130:
 	move	(a3)+,d0
@@ -21024,7 +20892,7 @@ CC130:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CC158
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC14E:
 	move	#$5CC0,d6
@@ -21047,14 +20915,14 @@ AsmT:
 	beq.b	CC188
 	cmp	#'TE',d0
 	beq.b	CC1B0
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC188:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"L"<<(1*8)+$8000,d0
 	beq	CD878
-	br	_HandleMacroos
+	br	_HandleMacros
 
 Asm_TS:
 	move	(a3)+,d0
@@ -21063,14 +20931,14 @@ Asm_TS:
 	beq	CC282
 	cmp	#"T"<<(1*8)+$8000,d0
 	beq	Asm_tsT
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC1B0:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"XT"+$8000,d0
 	beq.b	CC1BE
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC1BE:
 	tst	(MACRO_LEVEL-DT,a4)
@@ -21159,7 +21027,7 @@ CC282:
 	beq.b	CC29C
 	cmp	#$CC00,d0
 	beq.b	CC2B0
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC29C:
 	move	#$4A00,d6
@@ -21183,7 +21051,7 @@ CC2BC:
 	beq	CC512
 	cmp	#$4150,d0
 	beq.b	CC2D2
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC2D2:
 	move	(a3)+,d0
@@ -21254,7 +21122,7 @@ CC2D2:
 	beq	CC4C0
 	cmp	#'LT',d0
 	beq	CC4BA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC3E2:
 	move	#$50FA,d6
@@ -21424,7 +21292,7 @@ CC51E:
 	beq.b	CC550
 	cmp	#$5340,d0
 	beq.b	CC532
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC532:
 	move	(a3)+,d0
@@ -21435,7 +21303,7 @@ CC532:
 	beq	ERROR_IllegalSize
 	cmp	#$C200,d0
 	beq.b	CC550
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC550:
 	move	#$4AC0,d6
@@ -21445,7 +21313,7 @@ CC550:
 AsmU:
 	cmp	#'UN',d0
 	beq.b	CC564
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC564:
 	move	(a3)+,d0
@@ -21454,7 +21322,7 @@ CC564:
 	beq.b	CC578
 	cmp	#"PK"+$8000,d0
 	beq.b	CC582
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC578:
 	move	#$4E58,d6
@@ -21471,14 +21339,14 @@ AsmX:
 	beq.b	CC59C
 	cmp	#'XD',d0
 	beq.b	CC5AC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC59C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#"EF"+$8000,d0
 	beq	CD75C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC5AC:
 	move	(a3)+,d0
@@ -21486,7 +21354,7 @@ CC5AC:
 
 	cmp	#"EF"+$8000,d0
 	beq	CD778
-	br	_HandleMacroos
+	br	_HandleMacros
 
 ;**********************************************
 
@@ -21499,7 +21367,7 @@ _CEBCE:	bra	CEBCE
 ;***********************************************
 
 ConditionAssembl:
-	dc.w	_HandleMacroos-ConditionAssembl
+	dc.w	_HandleMacros-ConditionAssembl
 	dc.w	CC5FA-ConditionAssembl
 	dc.w	CC614-ConditionAssembl
 	dc.w	CC64A-ConditionAssembl
@@ -21507,103 +21375,103 @@ ConditionAssembl:
 	dc.w	CC6DA-ConditionAssembl
 	dc.w	CC7B8-ConditionAssembl
 	dc.w	CC7D2-ConditionAssembl
-	dc.w	_HandleMacroos-ConditionAssembl
+	dc.w	_HandleMacros-ConditionAssembl
 	dc.w	CC802-ConditionAssembl
 	dc.w	CC926-ConditionAssembl
-	dc.w	_HandleMacroos-ConditionAssembl
+	dc.w	_HandleMacros-ConditionAssembl
 	dc.w	CC95C-ConditionAssembl
 	dc.w	CC9A2-ConditionAssembl
 	dc.w	CCA04-ConditionAssembl
 	dc.w	CCA4A-ConditionAssembl
 	dc.w	CCA9E-ConditionAssembl
-	dc.w	_HandleMacroos-ConditionAssembl
+	dc.w	_HandleMacros-ConditionAssembl
 	dc.w	CCAFA-ConditionAssembl
 	dc.w	CCB9C-ConditionAssembl
 	dc.w	CCBF0-ConditionAssembl
-	dc.w	_HandleMacroos-ConditionAssembl
-	dc.w	_HandleMacroos-ConditionAssembl
-	dc.w	_HandleMacroos-ConditionAssembl
+	dc.w	_HandleMacros-ConditionAssembl
+	dc.w	_HandleMacros-ConditionAssembl
+	dc.w	_HandleMacros-ConditionAssembl
 	dc.w	CCC0A-ConditionAssembl
-	dc.w	_HandleMacroos-ConditionAssembl
-	dc.w	_HandleMacroos-ConditionAssembl
-	dc.w	_HandleMacroos-ConditionAssembl
+	dc.w	_HandleMacros-ConditionAssembl
+	dc.w	_HandleMacros-ConditionAssembl
+	dc.w	_HandleMacros-ConditionAssembl
 
-_HandleMacroos:
-	jmp	HandleMacroos
+_HandleMacros:
+	jmp	HandleMacros
 
 CC5FA:
 	cmp	#'AU',d0
 	beq.b	CC604
-__HandleMacroos:
-	br	_HandleMacroos
+__HandleMacros:
+	br	_HandleMacros
 
 CC604:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D44F,d0
 	beq	Asm_AUTO
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC614:
 	cmp	#'BA',d0
 	beq.b	CC61E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC61E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#'SE',d0
 	beq.b	CC62C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC62C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$5245,d0
 	beq.b	CC63A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC63A:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C700,d0
 	beq	CD51E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC64A:
 	cmp	#$434E,d0
 	beq.b	CC678
 	cmp	#$434D,d0
 	beq.b	CC65A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC65A:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$4558,d0
 	beq.b	CC668
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC668:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C954,d0
 	beq	CE45C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC678:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CF50,d0
 	beq	Asm_CNOP
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC688:
 	cmp	#$4453,d0
 	beq.b	CC69A
 	cmp	#$C453,d0
 	beq	CE190
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC69A:
 	move	(a3)+,d0
@@ -21622,7 +21490,7 @@ CC69A:
 	beq	CE202
 	cmp	#$C050,d0
 	beq	CE202
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC6DA:
 	cmp	#'EN',d0
@@ -21635,21 +21503,21 @@ CC6DA:
 	beq	CC7A8
 	cmp	#'EX',d0
 	beq.b	CC6FE
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC6FE:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$5452,d0
 	beq.b	CC70C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC70C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CE00,d0
 	beq	CD75C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC71C:
 	move	(a3)+,d0
@@ -21658,14 +21526,14 @@ CC71C:
 	beq	Asm_EQU
 	cmp	#$D552,d0
 	beq	CD706
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC734:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C54E,d0
 	beq	CD93C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC744:
 	move	(a3)+,d0
@@ -21686,52 +21554,52 @@ CC744:
 	beq	CE27E
 	cmp	#$C442,d0
 	beq	CD55C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC788:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D900,d0
 	beq	CD778
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC798:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C600,d0
 	beq	CE5BC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC7A8:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D345,d0
 	beq	CE5AC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC7B8:
 	cmp	#$4641,d0
 	beq.b	CC7C2
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC7C2:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C94C,d0
 	beq	CE616
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC7D2:
 	cmp	#$474C,d0
 	beq.b	CC7DC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC7DC:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$4F42,d0
 	beq.b	CC7EA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC7EA:
 	move	(a3)+,d0
@@ -21740,7 +21608,7 @@ CC7EA:
 	beq	CD778
 	cmp	#$C14C,d0
 	beq	CD778
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC802:
 	cmp	#$C946,d0
@@ -21753,28 +21621,28 @@ CC802:
 	beq.b	CC828
 	cmp	#'ID',d0
 	beq.b	CC846
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC828:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$4147,d0
 	beq.b	CC836
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC836:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C500,d0
 	beq	IncBinStuff
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC846:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CE54,d0
 	beq	CD880
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC856:
 	move	(a3)+,d0
@@ -21785,35 +21653,35 @@ CC856:
 	beq.b	CC870
 	cmp	#$4344,d0
 	beq.b	CC89E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC870:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C94E,d0
 	beq	IncBinStuff
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC880:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$5544,d0
 	beq.b	CC88E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC88E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C500,d0
 	beq	Asm_Include
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC89E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C952,d0
 	beq	CE61A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC8AE:
 	move	(a3)+,d0
@@ -21846,33 +21714,33 @@ CC8AE:
 	beq	CE49A
 	cmp	#$9100,d0
 	beq	CE490
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC926:
 	cmp	#'JU',d0
 	beq.b	CC930
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC930:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$4D50,d0
 	beq.b	CC93E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC93E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$5054,d0
 	beq.b	CC94C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC94C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D200,d0
 	beq	CD6D0
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC95C:
 	cmp	#$4C4F,d0
@@ -21881,35 +21749,35 @@ CC95C:
 	beq.b	CC992
 	cmp	#$4C49,d0
 	beq.b	CC982
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC972:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C144,d0
 	beq	CD920
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC982:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D354,d0
 	beq	CD812
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC992:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C54E,d0
 	beq	CD81E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC9A2:
 	cmp	#'ME',d0
 	beq.b	CC9E6
 	cmp	#'MA',d0
 	beq.b	CC9B2
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC9B2:
 	move	(a3)+,d0
@@ -21918,40 +21786,40 @@ CC9B2:
 	beq.b	CC9D6
 	cmp	#$534B,d0
 	beq.b	CC9C6
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC9C6:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$9200,d0
 	beq	CD888
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC9D6:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CF00,d0
 	beq	GoGoMacro
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC9E6:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$5849,d0
 	beq.b	CC9F4
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CC9F4:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D400,d0
 	beq	CE44C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCA04:
 	cmp	#$4E4F,d0
 	beq.b	CCA0E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCA0E:
 	move	(a3)+,d0
@@ -21962,21 +21830,21 @@ CCA0E:
 	beq.b	CCA2A
 	cmp	#'LI',d0
 	beq.b	CCA3A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCA2A:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C745,d0
 	beq	CD808
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCA3A:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D354,d0
 	beq	CD818
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCA4A:
 	cmp	#'OF',d0
@@ -21985,35 +21853,35 @@ CCA4A:
 	beq.b	CCA70
 	cmp	#'OR',d0
 	beq.b	CCA60
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCA60:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C700,d0
 	beq	CD8FA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCA70:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C400,d0
 	beq	CD952
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCA80:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#'FS',d0
 	beq.b	CCA8E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCA8E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C554,d0
 	beq	CE74A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCA9E:
 	cmp	#'PR',d0
@@ -22022,14 +21890,14 @@ CCA9E:
 	beq.b	CCAEA
 	cmp	#'PA',d0
 	beq.b	CCADA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCAB4:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#'IN',d0
 	beq.b	CCAC2
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCAC2:
 	move	(a3)+,d0
@@ -22038,21 +21906,21 @@ CCAC2:
 	beq	CD4F0
 	cmp	#$D454,d0
 	beq	Asm_PRINTT
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCADA:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C745,d0
 	beq	CD7FA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCAEA:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C54E,d0
 	beq	CD83A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCAFA:
 	cmp	#'RS',d0
@@ -22063,7 +21931,7 @@ CCAFA:
 	beq	CCB8C
 	cmp	#'ÒS',d0
 	beq	CE702
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCB1A:
 	move	(a3)+,d0
@@ -22072,7 +21940,7 @@ CCB1A:
 	beq	CD58C
 	cmp	#$C700,d0
 	beq	CD730
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCB32:
 	move	(a3)+,d0
@@ -22087,49 +21955,49 @@ CCB32:
 	beq.b	CCB7C
 	cmp	#$5245,d0
 	beq.b	CCB5E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCB5E:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$5345,d0
 	beq.b	CCB6C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCB6C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D400,d0
 	beq	CE6E0
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCB7C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D400,d0
 	beq	CE6E6
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCB8C:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D247,d0
 	beq	C7576
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCB9C:
 	cmp	#'SE',d0
 	beq.b	CCBBC
 	cmp	#'SP',d0
 	beq.b	CCBAC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCBAC:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C300,d0
 	beq	CD860
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCBBC:
 	move	(a3)+,d0
@@ -22138,54 +22006,54 @@ CCBBC:
 	beq	ASSEM_CMDLABELSET
 	cmp	#'CT',d0
 	beq.b	CCBD2
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCBD2:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#'IO',d0
 	beq.b	CCBE0
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCBE0:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CE00,d0
 	beq	CD88C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCBF0:
 	cmp	#'TT',d0
 	beq.b	CCBFA
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCBFA:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$CC00,d0
 	beq	CD878
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCC0A:
 	cmp	#'XR',d0
 	beq.b	CCC1A
 	cmp	#'XD',d0
 	beq.b	CCC2A
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCC1A:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C546,d0
 	beq	CD75C
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCC2A:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C546,d0
 	beq	CD778
-	br	_HandleMacroos
+	br	_HandleMacros
 
 
 _C00FA44:	bra.w	CFA44
@@ -22296,7 +22164,7 @@ CondAsmE:
 	beq.b	CCDC6
 	cmp	#'EL',d0
 	beq.b	CCDFC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCDC6:
 	move	(a3)+,d0
@@ -22309,28 +22177,28 @@ CCDC6:
 	beq.b	CCDEC
 	cmp	#$C44D,d0
 	beq	CE44E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCDEC:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$C600,d0
 	beq	CE5BC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCDFC:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$D345,d0
 	beq	CE5AC
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CondAsmI:
 	cmp	#$C946,d0
 	beq	CE596
 	cmp	#'IF',d0
 	beq.b	CCE1E
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCE1E:
 	move	(a3)+,d0
@@ -22363,19 +22231,19 @@ CCE1E:
 	beq	CE596
 	cmp	#$9100,d0
 	beq	CE596
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CondAsmM:
 	cmp	#'MA',d0
 	beq.b	CCEA0
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCEA0:
 	move	(a3)+,d0
 	and	d4,d0
 	cmp	#$4352,d0
 	beq.b	CCEAE
-	br	_HandleMacroos
+	br	_HandleMacros
 
 CCEAE:
 	move	(a3)+,d0
@@ -22383,7 +22251,7 @@ CCEB0:
 	and	d4,d0
 	cmp	#$CF00,d0
 	beq	GoGoMacro
-	br	_HandleMacroos
+	br	_HandleMacros
 
 ;********** INCIFF STUFF *************
 
@@ -22391,7 +22259,7 @@ AsmIncIFFOK:
 	movem.l	d0-d7/a0-a5,-(sp)
 	lea	(SourceCode-DT,a4),a1
 	bsr	OntfrutselNaam
-	jsr	(MenNemeNaamEnPad).l
+	jsr	(JoinIncAndIncdir).l
 	move.b	#0,(IncIff_tiepe-DT,a4)
 	move.b	#0,(IncIff_colmap_pos-DT,a4)
 	cmp.b	#',',(a6)	;, ?
@@ -22717,7 +22585,7 @@ IncIff_decompressPic:
 IncIff_readerror:
 	move.l	d7,-(sp)
 	moveq	#-2,d7
-	jsr	(close_bestand).l
+	jsr	(IO_CloseFile).l
 	move.l	(sp)+,d7
 	tst	d7	;passone
 	bmi.b	CD27A
@@ -22772,7 +22640,7 @@ CD2E8:
 CD2FA:
 	move.l	d0,(FileLength-DT,a4)
 	lea	(HInciff.MSG).l,a0
-	jsr	(PRINTINCLUDENAME).l
+	jsr	(Print_IncludeName).l
 	move.l	d7,-(sp)
 	moveq	#-1,d7
 	jsr	(C183DC).l
@@ -22845,7 +22713,7 @@ CD36E:
 IncIff_noFORM:
 	move.l	d7,-(sp)
 	moveq	#-2,d7
-	jsr	(close_bestand).l
+	jsr	(IO_CloseFile).l
 	move.l	(sp)+,d7
 	bsr.b	CD3EE
 	br	ERROR_TryingtoincludenonILBM
@@ -22853,7 +22721,7 @@ IncIff_noFORM:
 IncIff_noILBM:
 	move.l	d7,-(sp)
 	moveq	#-2,d7
-	jsr	(close_bestand).l
+	jsr	(IO_CloseFile).l
 	move.l	(sp)+,d7
 	bsr.b	CD3EE
 	br	ERROR_IFFfileisnotaILBM
@@ -22861,7 +22729,7 @@ IncIff_noILBM:
 IncIff_geenBMHD:
 	move.l	d7,-(sp)
 	moveq	#-2,d7
-	jsr	(close_bestand).l
+	jsr	(IO_CloseFile).l
 	move.l	(sp)+,d7
 	bsr.b	CD3EE
 	br	ERROR_CanthandleBODYbBMHD
@@ -22949,9 +22817,9 @@ Asm_PRINTT:
 
 
 	lea	(SourceCode-DT,a4),a0
-	jsr	(printthetext).l
-	jsr	(druk_cr_nl).l
-	jsr	Druk_Clearbuffer
+	jsr	(Print_Text).l
+	jsr	(Print_NewLine).l
+	jsr	Print_ClearBuffer
 CD4E8:
 	bsr	PARSE_GET_KOMMA_IF_ANY
 	bpl.b	Asm_PRINTT
@@ -23112,7 +22980,7 @@ CD64C:
 IncBinStuff:
 	lea	(SourceCode-DT,a4),a1
 	bsr	OntfrutselNaam
-	jsr	(MenNemeNaamEnPad).l
+	jsr	(JoinIncAndIncdir).l
 	bsr	PARSE_GET_KOMMA_IF_ANY
 	bne.b	CD670
 	jsr	(Parse_GetDefinedValue).l
@@ -23129,7 +22997,7 @@ CD67A:
 	tst	d7	;passone
 	bmi.b	CD6CA
 	lea	(HIncbin.MSG).l,a0
-	jsr	(PRINTINCLUDENAME).l
+	jsr	(Print_IncludeName).l
 	movem.l	d0/a6,-(sp)
 	move.l	(INSTRUCTION_ORG_PTR-DT,a4),d2
 	add.l	(CURRENT_ABS_ADDRESS-DT,a4),d2
@@ -23141,7 +23009,7 @@ CD67A:
 	jsr	(read_nr_d3_bytes).l
 	move.l	d7,-(sp)
 	moveq.l	#-1,d7
-	jsr	(close_bestand).l
+	jsr	(IO_CloseFile).l
 	move.l	(sp)+,d7
 	movem.l	(sp)+,d0/a6
 CD6CA:
@@ -23301,7 +23169,7 @@ CD860:
 	tst	d7	;passone
 	bmi.b	CD876
 CD86E:
-	jsr	druk_cr_nl
+	jsr	Print_NewLine
 	subq.l	#1,d3
 	bne.b	CD86E
 CD876:
@@ -24237,7 +24105,6 @@ Asm_EQU:
 	tst	d7	;passone
 	bpl.b	CE246
 
-		;jsr	test_debug
 	move.l	d3,-(a1)
 	move	d2,-(a1)
 CE246:
@@ -24299,7 +24166,7 @@ CE2D8:
 	addq.l	#1,(DATA_CURRENTLINE-DT,a4)
 	tst.b	(DATA_CURRENTLINE+3-DT,a4)
 	bne.b	CE2E8
-	jsr	(messages_get).l
+	jsr	(IO_GetKeyMessages).l
 CE2E8:
 	btst	#AF_DEBUG1,d7
 	beq.b	CE30C
@@ -24894,12 +24761,12 @@ UpdateShowError:
 	move.l	#$FFFFFFFF,(a1)	;end of tabel
 	move.l	a1,(AsmErrorPos-DT,a4)
 	moveq	#0,d0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(DATA_CURRENTLINE-DT,a4),d0
 	beq.b	Test_NoProblems
 	move.l	d0,(FirstLineNr-DT,a4)
 	move.l	(DATA_LINE_START_PTR-DT,a4),(FirstLinePtr-DT,a4)
-	bsr	Drukaf_CurrentLine
+	bsr	Print_CurrentLine
 Test_NoProblems:
 	movem.l	(sp)+,d0-d7/a0-a6
 	rts
@@ -25073,7 +24940,6 @@ Asmbl_AddSubCmp:
 	bsr	Asm_SkipInstructionHead
 	move.b	d5,(OpperantSize-DT,a4)
 	jsr	(asm_get_any_opp).l
-;		jsr	test_debug
 
 	move	d1,(UsedRegs-DT,a4)
 	bsr	Parse_GetKomma
@@ -25144,7 +25010,6 @@ Asmbl_AddSubCmpImm:
 	br	ASM_STORE_INSTRUCTION_HEAD
 
 .cmp_pc:
-;	jsr	test_debug
 	cmp.w	#$BC01,d6	;cmpi
 	bne.w	ERROR_InvalidAddress
 
@@ -25350,12 +25215,12 @@ CEC62:
 	lea	(WarningValues.MSG).l,a0
 	tst	d7	;passone
 	bpl.b	CECA2
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(DATA_CURRENTLINE-DT,a4),d0
 	beq	CECA2
 	move.l	d0,(FirstLineNr-DT,a4)
 	move.l	(DATA_LINE_START_PTR-DT,a4),(FirstLinePtr-DT,a4)
-	bsr	Drukaf_CurrentLine
+	bsr	Print_CurrentLine
 CECA2:
 	move.b	d3,d0
 	ext.w	d0
@@ -26405,7 +26270,6 @@ Asmbl_FinishFmove:
 	bsr	asm_4bytes_OpperantSize
 	move.b	d5,(OpperantSize-DT,a4)
 	jsr	asm_get_any_opp
-;	jsr	test_debug
 	bsr	Parse_GetKomma
 	and.b	#15,(OpperantSize-DT,a4)
 	cmp	#$FFFF,d5
@@ -26596,21 +26460,21 @@ CF9F6:
 	or.w	d1,d6
 	br	ASM_STORE_LONG
 
-CFA44:
+CFA44:	; this is caled A LOT!
 	moveq	#-1,d0
 	bsr	Processor_warning
 	bsr	asm_4bytes_OpperantSize
 	btst	#$11,d6
-	beq.b	CFA74
+	beq.b	.CFA74
 	move.b	#$80,(OpperantSize-DT,a4)
 	btst	#$10,d6
-	bne.b	CFA66
+	bne.b	.CFA66
 	move.b	#$40,(OpperantSize-DT,a4)
-CFA66:
+.CFA66:
 	jsr	(asm_get_any_opp).l
 	cmp	#$0100,d5
 	bne	ERROR_InvalidAddress
-CFA74:
+.CFA74:
 	br	ASM_STORE_LONG
 
 CFA78:
@@ -27674,7 +27538,6 @@ C105C0:
 ShowErrorMsg:
 	move.l	a6,(ParsePos-DT,a4)
 
-;	jsr	test_debug
 	
 	lea	(ERROR_AddressRegExp).l,a0
 	move.l	(sp)+,d0
@@ -27842,14 +27705,14 @@ C10718:
 	move	(MACRO_LEVEL-DT,a4),d0
 	add	(INCLUDE_LEVEL-DT,a4),d0
 	bne	C10690
-	move.l	(Cut_Blok_End-DT,a4),a3
+	move.l	(Cut_Buffer_End-DT,a4),a3
 	addq.l	#1,a3
 	move.l	a3,a2
 	addq.l	#2,a3
-	addq.l	#2,(Cut_Blok_End-DT,a4)
-	addq.l	#2,(sourceend-DT,a4)
+	addq.l	#2,(Cut_Buffer_End-DT,a4)
+	addq.l	#2,(SourceEnd-DT,a4)
 	move.l	(LabelStart-DT,a4),d0
-	cmp.l	(Cut_Blok_End-DT,a4),d0
+	cmp.l	(Cut_Buffer_End-DT,a4),d0
 	bls.b	C1076E
 	move.l	a2,d0
 	sub.l	a5,d0
@@ -27865,12 +27728,12 @@ C10746:
 	or.b	#$42,d1
 	move.b	d1,(a5)+
 	addq.w	#2,a6
-	bsr	messages_get
+	bsr	IO_GetKeyMessages
 	br	asmbl_BraB
 
 C1076E:
-	subq.l	#2,(Cut_Blok_End-DT,a4)
-	subq.l	#2,(sourceend-DT,a4)
+	subq.l	#2,(Cut_Buffer_End-DT,a4)
+	subq.l	#2,(SourceEnd-DT,a4)
 	bset	#7,d7
 	bset	#1,d7
 	rts
@@ -28057,7 +27920,7 @@ C10926:
 Asm_IncLink:
 	lea	(SourceCode-DT,a4),a1
 	bsr	incbinsub1
-	bsr	MenNemeNaamEnPad
+	bsr	JoinIncAndIncdir
 	move.l	a6,-(sp)
 	bsr	GetDiskFileLengte
 	move.l	(sp)+,a6
@@ -28073,7 +27936,7 @@ Asm_IncLink:
 	tst.w	d7
 	bmi.b	.pass1
 	lea	(HInclink.MSG).l,a0
-	jsr	(PRINTINCLUDENAME).l
+	jsr	(Print_IncludeName).l
 .pass1:
 	movem.l	d0/a6,-(sp)
 	move.l	(buffer_ptr-DT,a4),d2
@@ -30240,38 +30103,38 @@ C118C8:
 	fmove.x	fp0,-(sp)
 	bsr	C11504
 	BTST	#AF_UNDEFVALUE,d7
-	bne.b	C118FC
+	bne.b	.C118FC
 	fmove.x	fp0,fp3
 	move	d2,d4
-	beq.b	C118F0
+	beq.b	.C118F0
 	fmove.x	(sp)+,fp0
 	move	(sp)+,d2
-	beq.b	C118EC
+	beq.b	.C118EC
 	moveq	#3,d0
 	rts
 
-C118EC:
+.C118EC:
 	moveq	#1,d0
 	rts
 
-C118F0:
+.C118F0:
 	fmove.x	(sp)+,fp0
 	move	(sp)+,d2
-	beq.b	C11908
+	beq.b	.C11908
 	moveq	#2,d0
 	rts
 
-C118FC:
+.C118FC:
 	add	#14,sp
 	moveq	#0,d2
 	moveq	#0,d3
 	moveq	#0,d4
 	moveq	#0,d5
-C11908:
+.C11908:
 	moveq	#0,d0
 	rts
 
-C1190C:
+CreateMenus:
 	movem.l	d0-d7/a0-a6,-(sp)
 	move.l	#command_menus,d0
 	jsr	(Init_menustructure).l
@@ -30283,16 +30146,16 @@ C1190C:
 	jsr	(Init_menustructure).l
 	move.l	d0,(Monitor_MenuBase-DT,a4)
 	tst	(FPU_Type-DT,a4)
-	bne.b	C1194E
+	bne.b	.skip
 	move	#16,(W22FFE).l
-C1194E:
-	move.l	#debug_menus,d0
+
+.skip:	move.l	#debug_menus,d0
 	jsr	(Init_menustructure).l
 	move.l	d0,(Debug_MenuBase-DT,a4)
 	movem.l	(sp)+,d0-d7/a0-a6
 	rts
 
-C11964:
+DestroyMenus:
 	movem.l	d0-d7/a0-a6,-(sp)
 	move.l	(Comm_menubase-DT,a4),d0
 	jsr	(Breakdown_menu).l
@@ -30319,65 +30182,65 @@ CommandlineInputHandler:
 	bset	#SB2_MATH_XN_OK,(SomeBits2-DT,a4)
 	btst	#SB1_CLOSE_FILE,(SomeBits-DT,a4)
 	beq.b	.FileClosed
-	bsr	close_bestand
+	bsr	IO_CloseFile
 .FileClosed:
 	move.l	(DATA_USERSTACKPTR-DT,a4),sp
 	clr	(SST_STEPS-DT,a4)
-	move.b	#$FF,(B2BEB8-DT,a4)	;NOBREAK
+	move.b	#$FF,(B2BEB8-DT,a4)	; NOBREAK
 	clr.l	(DATA_CURRENTLINE-DT,a4)
 	moveq	#0,d7
 
-	clr.w	(Cursor_col_pos-DT,a4)	;x reset col pos
+	clr.w	(Cursor_col_pos-DT,a4)	; x reset col pos
 	jsr	Place_cursor_blokje
 
 	lea	(Prompt_Char,pc),a0
 	bsr	Druk_CmdMenuText
-	move.b	#21,(B2BEB8-DT,a4)	;AMIGA_C
+	move.b	#21,(B2BEB8-DT,a4)	; AMIGA_C
 MAINLOOPAGAIN:
 	lea	(CurrentAsmLine-DT,a4),a6
 	move.l	a6,a1
 	moveq	#0,d1
-.Handle_WS:
-	move.b	(a6)+,d1
+
+.ws:	move.b	(a6)+,d1
 	tst.b	(Variable_base-DT,a4,d1.w)
-	bmi.b	.Handle_WS
+	bmi.b	.ws
 	subq.w	#1,a6
-.lopje:
-	move.b	(a6)+,(a1)+
-	bne.b	.lopje
+
+.loop:	move.b	(a6)+,(a1)+
+	bne.b	.loop
 
 	lea	(CurrentAsmLine-DT,a4),a6
 	tst.b	(a6)
 	beq	SPECIALKEY_HANDLER
 	moveq	#10,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	(a6)+,d0
 	cmp.b	#'!',d0
 	beq.b	exit_or_extentie
 	cmp.b	#'#',d0
 	beq	About_req
 	cmp.b	#'a',d0
-	bcs.b	.Hoofdletter
+	bcs.b	.upper
 	sub.b	#$20,d0
-.Hoofdletter:
-	moveq	#0,d1
+
+.upper:	moveq	#0,d1
 	move.b	d0,(Comm_Char-DT,a4)
 	lea	(Command_Line_Table,pc),a5
-	sub.b	#$3D,d0		;'='
+	sub.b	#$3D,d0			; '='
 	bmi.w	ERROR_IllegalComman
-	cmp.b	#$1E,d0		;'Z'-'='
+	cmp.b	#$1E,d0			; 'Z'-'='
 	bhi.w	ERROR_IllegalComman
 	add.b	d0,d0
 	ext.w	d0
 	add	d0,d0
 	add	d0,a5
 	btst	#0,(3,a5)
-	beq.b	C11A64
+	beq.b	.skip
 	bsr	GETNUMBERAFTEROK
-C11A64:
-	moveq	#-2,d2
+
+.skip:	moveq	#-2,d2
 	and.l	(a5),d2
 	move.l	d2,a5
 	move.l	d0,-(sp)
@@ -30391,14 +30254,14 @@ C11A64:
 
 exit_or_extentie:
 	cmp.b	#"!",(a6)
-	beq.b	exit_quick		;"!!"
+	beq.b	exit_quick		; "!!"
 	cmp.b	#"R",(a6)
-	beq.b	exit_restart		;"!R"
+	beq.b	exit_restart		; "!R"
 	cmp.b	#"r",(a6)
-	beq.b	exit_restart		;"!R"
+	beq.b	exit_restart		; "!R"
 
 	tst.b	(a6)
-	bne.b	C11AB2
+	bne.b	com_ChangeExtension
 	move.b	(CurrentSource-DT,a4),d1
 	move.b	d1,(B30174-DT,a4)
 	add.b	#$30,d1
@@ -30413,9 +30276,9 @@ exit_quick:
 	moveq	#"Y",d0
 	jmp	(Restart_Entrypoint).l
 
-C11AB2:
+com_ChangeExtension:
 	clr.b	(16,a6)
-	bsr	change_extention
+	bsr	Prefs_ChangeExtension
 	br	CommandlineInputHandler
 
 C11ABE:
@@ -30431,7 +30294,7 @@ C11ACA:
 About_req:
 	movem.l	d0-d7/a0-a6,-(sp)
 	move.l	#1,(RequesterType).l
-	lea	(_ok_no.MSG).l,a2
+	lea	(_Yes_No.MSG).l,a2
 	lea	(TRASH_abouttxt.MSG).l,a1
 	jsr	ShowReqtoolsRequester
 	movem.l	(sp)+,d0-d7/a0-a6
@@ -30452,15 +30315,15 @@ GETNUMBERAFTEROK:
 	bsr	Convert_A2I
 	move	(sp)+,(OpperantSize-DT,a4)
 	cmp.b	#1,(OpperantSize-DT,a4)
-	beq.b	C11B2E
+	beq.b	.ok
 	btst	#0,d0
-	beq.b	C11B2E
+	beq.b	.ok
 	cmp	#2,(ProcessorType-DT,a4)
-	bge.b	C11B2E
+	bge.b	.ok
 	cmp.b	#$61,d1
 	beq	ERROR_WordatOddAddress
-C11B2E:
-	move.l	(sp)+,a5
+
+.ok:	move.l	(sp)+,a5
 	cmp.b	#$61,d1
 	rts
 
@@ -30471,13 +30334,13 @@ C11B36:
 	bsr	C10A56
 	move	(sp)+,(OpperantSize-DT,a4)
 	btst	#0,d0
-	beq.b	C11B5E
+	beq.b	.ok
 	cmp	#2,(ProcessorType-DT,a4)
-	bge.b	C11B2E
+	bge.b	.ok
 	cmp.b	#$61,d1
 	beq	ERROR_WordatOddAddress
-C11B5E:
-	move.l	(sp)+,a5
+
+.ok:	move.l	(sp)+,a5
 	cmp.b	#$61,d1
 	rts
 
@@ -30504,7 +30367,7 @@ keys_NotReturn:
 	cmp.b	#$1B,d0			; ESC !!
 	beq	Enter_Editor1
 C11B9E:
-	bsr	SENDCHARDELSCR
+	bsr	Print_DelScr
 	br	CommandlineInputHandler
 
 keys_ESC:
@@ -30554,15 +30417,15 @@ C11BFC:
 
 
 C_SyntPrefs:
-	move.b	#2,(Prefs_tiepe-DT,a4)
+	move.b	#2,(PrefsType-DT,a4)
 	bra.b	C_doprefs
 
 C_EnvPrefs:
-	move.b	#1,(Prefs_tiepe-DT,a4)
+	move.b	#1,(PrefsType-DT,a4)
 	bra.b	C_doprefs
 
 C_AsmPrefs:
-	move.b	#0,(Prefs_tiepe-DT,a4)
+	move.b	#0,(PrefsType-DT,a4)
 C_doprefs:
 	movem.l	d0-d7/a0-a6,-(sp)
 	jsr	(Handle_prefs_windows).l
@@ -30570,9 +30433,11 @@ C_doprefs:
 	rts
 
 C11C26:
+	IF	AMIGA_GUIDE
 	movem.l	d0-d7/a0-a6,-(sp)
 	jsr	(AmigaGuideGedoe).l
 	movem.l	(sp)+,d0-d7/a0-a6
+	ENDIF
 	rts
 
 C11C36:
@@ -30645,7 +30510,7 @@ ErrMsgNoDebug:
 	bra.b	Print_DrukErrorRegel
 
 ErrMsgNoDeal:
-	bsr	Drukaf_CurrentLine
+	bsr	Print_CurrentLine
 
 ErrLijnNul:
 	bsr	new2old_stuff
@@ -30657,7 +30522,7 @@ C11CF0:
 
 C11CF8:
 	lea	(HReAssembling.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	bsr	new2old_stuff
 	jmp	(ReAssemble).l
 
@@ -30673,7 +30538,7 @@ Print_DrukErrorRegel:
 	cmp.l	#128,d7
 	bhi.s	ErrMsgNoDeal
 
-	lea	(regel_buffer-DT,a4),a1
+	lea	(line_buffer-DT,a4),a1
 	move.l	a1,-(sp)
 .lopje:
 	move.b	(a0)+,(a1)+
@@ -30681,59 +30546,59 @@ Print_DrukErrorRegel:
 	move.b	#0,(a1)
 
 	move.l	(FirstLineNr-DT,a4),d0
-	bsr	DrukAf_LineNrPrint
+	bsr	Print_LineNumber
 
 	move.l	(sp)+,a0
-	bsr	printthetext
-	bsr	Druk_Clearbuffer
+	bsr	Print_Text
+	bsr	Print_ClearBuffer
 
 	bset	#SB2_REVERSEMODE,(SomeBits2-DT,a4)
 	move.l	(ParsePos-DT,a4),a0
-	bsr	printthetext
-	bsr	Druk_Clearbuffer
+	bsr	Print_Text
+	bsr	Print_ClearBuffer
 	bclr	#SB2_REVERSEMODE,(SomeBits2-DT,a4)
 
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	bra.b	ErrLijnNul
 
 
 Print_ErrorTxt:
 	move.b	#$9B,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	#$31,d0		;'1'
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	#$48,d0		;'H'
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$2A,d0		;'*'
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$2A,d0		;'*'
-	bsr	SENDONECHARNORMAL
-	bsr	druk_af_space
+	bsr	Print_Char
+	bsr	Print_Space
 	move.l	a0,-(sp)
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(sp)+,a0
 	tst	(INCLUDE_LEVEL-DT,a4)
-	beq	druk_cr_nl
+	beq	Print_NewLine
 	cmp.b	#$46,(a0)	;'F'
 	bne.b	C11D52
 	cmp.b	#$69,(1,a0)	;'i'
-	beq	druk_cr_nl
+	beq	Print_NewLine
 C11D52:
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	moveq	#$49,d0		;'I' In file
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$6E,d0		;'n'
-	bsr	SENDONECHARNORMAL
-	bsr	druk_af_space
+	bsr	Print_Char
+	bsr	Print_Space
 	moveq	#$66,d0		;'f'
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$69,d0		;'i'
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$6C,d0		;'l'
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$65,d0		;'e'
-	bsr	SENDONECHARNORMAL
-	bsr	druk_af_space
+	bsr	Print_Char
+	bsr	Print_Space
 
 	move.l	(SOLO_CurrentIncPtr-DT,a4),a0
 	
@@ -30765,9 +30630,9 @@ C11DBA:
 	addq.w	#1,a0
 C11DBC:
 	move.l	(sp)+,a1
-	bsr	printthetext
+	bsr	Print_Text
 	clr	(INCLUDE_LEVEL-DT,a4)
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 
 	move.l	a6,a0
 	move.l	a0,-(sp)	;set pointer op stack
@@ -30783,11 +30648,11 @@ C11DBC:
 .out:
 	move.l	a0,(sp)		;re-set pointer
 
-	bsr	druk_af_space
+	bsr	Print_Space
 	move.l	(ErrorLijnInCode-DT,a4),d0
 	subq.l	#1,d0
 	bsr	Druk_D0_inCommandline
-	bsr	druk_af_space
+	bsr	Print_Space
 
 	move.l	(sp)+,a0
 	bsr	.drukerrorregels
@@ -30795,27 +30660,27 @@ C11DBC:
 
 .megaJump:
 	move.b	#$BB,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 
 	move.l	(ErrorLijnInCode-DT,a4),d0
 	bsr	Druk_D0_inCommandline
-	bsr	druk_af_space
-	bsr	Druk_Clearbuffer
+	bsr	Print_Space
+	bsr	Print_ClearBuffer
 
 	bset	#SB2_REVERSEMODE,(SomeBits2-DT,a4)
 	move.l	(sp)+,a0
 	bsr	.drukerrorregels
 	move.l	a0,-(sp)
 
-	bsr	druk_af_space
+	bsr	Print_Space
 	move.l	(ErrorLijnInCode-DT,a4),d0
 	addq.l	#1,d0
 	bsr	Druk_D0_inCommandline
-	bsr	druk_af_space
+	bsr	Print_Space
 
 	move.l	(sp)+,a0
 	bsr	.drukerrorregels
-	br	druk_cr_nl
+	br	Print_NewLine
 
 .drukerrorregels:
 	subq.w	#1,a0
@@ -30829,10 +30694,10 @@ C11DBC:
 
 .C11E2A:
 	addq.w	#1,a0
-	bsr	printthetext
-	bsr     Druk_Clearbuffer
+	bsr	Print_Text
+	bsr     Print_ClearBuffer
 	bclr    #SB2_REVERSEMODE,(SomeBits2-DT,a4)
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	rts	
 
 Druk_Af_Regel1:
@@ -30855,7 +30720,7 @@ C11E54:
 C11E64:
 	addq.w	#1,(NrOfErrors-DT,a4)
 	move.l	a0,-(sp)
-	bsr	PRINT_PAGED
+	bsr	Print_Paged
 	move.l	(sp)+,a0
 	bsr	Print_ErrorTxt
 	move.l	(TEMP_STACKPTR-DT,a4),sp
@@ -30872,7 +30737,7 @@ Command_Line_Table:
 	dc.l	com_workspace		;=	61
 	dc.l	com_RedirectCMD		;>	62
 	dc.l	com_calculator+1	;?	
-	dc.l	com_apestaartje		;@	
+	dc.l	com_AtSign		;@	
 	dc.l	com_assemble		;A	65
 	dc.l	com_bottom		;B	
 	dc.l	com_copy		;C	
@@ -30903,55 +30768,54 @@ Command_Line_Table:
 
 EXHA_BUSADDRERROR:
 	lea	(At.MSG,pc),a0
-	jsr	(printthetext).l
+	jsr	(Print_Text).l
 	move.l	(pcounter_base-DT,a4),d0
-	bsr	druk_af_d0
+	bsr	Print_D0
 	lea	(Accessing.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(DATA_BUSPTRHI).l,d0
-	bsr	druk_af_d0
-	bsr	printthetext
+	bsr	Print_D0
+	bsr	Print_Text
 	move	(DATA_BUSACCESS).l,d1
 	moveq	#$52,d0
 	btst	#4,d1
 	bne.b	C11F42
 	moveq	#$57,d0
 C11F42:
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$49,d0
 	btst	#3,d1
 	beq.b	C11F50
 	moveq	#$4E,d0
 C11F50:
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move	d1,d0
 	and	#7,d0
 	add	#$0030,d0
-	bsr	SENDONECHARNORMAL
-	bsr	printthetext
+	bsr	Print_Char
+	bsr	Print_Text
 	move	(DATA_BUSFAILINST-DT,a4),d0
 	bsr	C15900
 	jmp	(EXHA_JUSTRETURN).l
 
-com_apestaartje:
+com_AtSign:
 	move.b	(a6)+,d0
 	bclr	#5,d0
-	cmp.b	#$44,d0		;'D'
-	beq	C13832
-	cmp.b	#$48,d0		;'H'
-	beq	C1226E
-	cmp.b	#$4E,d0		;'N'
-	beq	C126F6
-	cmp.b	#$42,d0		;'B'
-	beq.b	C11FA6
-	cmp.b	#$41,d0		;'A'
-	bne.b	C11FA4
-	jmp	(LINE_MEMASSEM).l
+	cmp.b	#"D",d0
+	beq	Line_Dis
+	cmp.b	#"H",d0
+	beq	Line_Hex
+	cmp.b	#"N",d0
+	beq	Line_ASCII
+	cmp.b	#"B",d0
+	beq.b	Line_Binary
+	cmp.b	#"A",d0
+	bne.b	.end
+	jmp	(Line_Assemble).l
 
-C11FA4:
-	rts
+.end:	rts
 
-C11FA6:
+Line_Binary:
 	clr.b	(B30040-DT,a4)
 	cmp.b	#$7B,(a6)
 	bne.b	C11FB8
@@ -30991,14 +30855,14 @@ C12002:
 	ext.l	d3
 	add.l	d3,d5
 	move.l	a5,d0
-	bsr	Druk_af_D0
+	bsr	Print_D0AndSpace
 	moveq	#$25,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 C12018:
 	bsr	C1202E
 	cmp.l	d5,a5
 	bne.b	C12018
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	dbra	d6,C12002
 	move.l	d5,(MEM_DIS_DUMP_PTR-DT,a4)
 	rts
@@ -31011,9 +30875,9 @@ C12036:
 	move.b	(a5)+,d0
 	bsr	C120AE
 	dbra	d3,C12036
-	br	druk_af_space
+	br	Print_Space
 
-C12044:
+Insert_Binary:
 	bsr	C11ABE
 	moveq	#0,d7
 	bsr	INPUTBEGINEND
@@ -31031,9 +30895,9 @@ C12062:
 	mulu	#7,d4
 	lea	(DCB.MSG,pc),a0
 	add	d4,a0
-	bsr	printthetext
+	bsr	Print_Text
 	moveq	#$25,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	(OpperantSize-DT,a4),d4
 	ext.w	d4
 	subq.w	#1,d4
@@ -31043,13 +30907,13 @@ C1208A:
 	dbra	d4,C1208A
 	cmp.l	a3,a2
 	bls.b	C1209E
-	bsr	Druk_af_eol
+	bsr	Print_EOL
 	bra.b	C12062
 
 C1209E:
-	bsr	Druk_af_eol
+	bsr	Print_EOL
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	(sp)+,(FirstLinePtr-DT,a4)
 	rts
 
@@ -31063,64 +30927,65 @@ C120B6:
 	beq.b	C120BE
 	moveq	#$31,d0
 C120BE:
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d7,C120B6
 	movem.l	(sp)+,d0-d7/a0-a6
 	rts
 
-com_printen:
+com_printen:	; P
 	move.b	(a6),d0
 	and.b	#$df,d0
 
-	cmp.b	#$53,(a6)	;S
-	beq.b	C120DA
-	cmp.b	#$73,(a6)	;s
-	bne	C1210E
-C120DA:
+	cmp.b	#"S",(a6)
+	beq.b	SetStartupParam
+	cmp.b	#"s",(a6)
+	bne	PrintLines
+
+SetStartupParam:
 	lea	(Startupparame.MSG,pc),a0
 	bsr	INPUTTEXT
 	tst.b	(CurrentAsmLine-DT,a4)
-	beq.b	C1210C
+	beq.b	.end
 	lea	(CurrentAsmLine-DT,a4),a1
 	lea	(Parameters-DT,a4),a0
 	moveq	#0,d0
-C120F2:
-	move.b	(a1)+,(a0)+
+
+.loop:	move.b	(a1)+,(a0)+
 	addq.w	#1,d0
 	cmp	#$00FE,d0
-	beq.b	C12100
+	beq.b	.done
 	tst.b	(a1)
-	bne.b	C120F2
-C12100:
-	move.b	#10,(a0)+
+	bne.b	.loop
+
+.done:	move.b	#10,(a0)+
 	clr.b	(a0)
 	addq.w	#1,d0
 	move.l	d0,(ParametersLengte-DT,a4)
-C1210C:
-	rts
 
-C1210E:
+.end:	rts
+
+PrintLines:
 	bsr	Convert_A2I
 	tst.b	d1
-	beq.b	C12146
+	beq.b	.end
 	move.l	d0,d5
-	beq.b	C12146
+	beq.b	.end
 	move.l	(FirstLinePtr-DT,a4),a0
 	move.l	(FirstLineNr-DT,a4),d1
-C12122:
-	move.l	d1,d0
+
+.loop:	move.l	d1,d0
 	addq.l	#1,d1
 	movem.l	d1/a0,-(sp)
-	bsr	DrukAf_LineNrPrint
+	bsr	Print_LineNumber
 	movem.l	(sp)+,d1/a0
 	cmp.b	#$1A,(a0)
 	beq	ERROR_EndofFile
-	bsr	printthetext
-	bsr	druk_cr_nl
+	bsr	Print_Text
+	bsr	Print_NewLine
 	subq.l	#1,d5
-	bne.b	C12122
-C12146:
-	rts
+	bne.b	.loop
+
+.end:	rts
 
 com_execute_dos:
 	tst.b	(a6)
@@ -31177,7 +31042,7 @@ Executioncomp.MSG:
 L1226A:
 	dc.l	0
 
-C1226E:
+Line_Hex:
 	clr.b	(B30040-DT,a4)
 	cmp.b	#$7B,(a6)
 	bne.b	C12280
@@ -31212,13 +31077,13 @@ C122C0:
 	addq.l	#8,d5
 	addq.l	#8,d5
 	move.l	a5,d0
-	bsr	Druk_af_D0
+	bsr	Print_D0AndSpace
 C122CA:
 	bsr	C1381C
 	cmp.l	d5,a5
 	bne.b	C122CA
 	moveq	#$22,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 C122D8:
 	move.b	(a3)+,d0
 	and	#$007F,d0
@@ -31229,12 +31094,12 @@ C122D8:
 C122EA:
 	moveq	#$2E,d0
 C122EC:
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	cmp.l	d5,a3
 	bne.b	C122D8
 	moveq	#$22,d0
-	bsr	SENDONECHARNORMAL
-	bsr	druk_cr_nl
+	bsr	Print_Char
+	bsr	Print_NewLine
 	dbra	d6,C122C0
 	move.l	d5,(MEM_DIS_DUMP_PTR-DT,a4)
 	rts
@@ -31261,7 +31126,7 @@ com_extern:
 C12356:
 	lea	(HPass1.MSG).l,a0
 	jsr	(beeldtextaf).l
-	move.l	(sourcestart-DT,a4),a0
+	move.l	(SourceStart-DT,a4),a0
 	move.l	(WORK_END-DT,a4),a1
 	subq.w	#1,a1
 	lea	(a1),a2
@@ -31330,7 +31195,7 @@ C123E8:
 	jsr	(beeldtextaf).l
 	bclr	#SB2_INDEBUGMODE,(SomeBits2-DT,a4)
 	bset	#SB2_INSERTINSOURCE,(SomeBits2-DT,a4)
-	move.l	(sourcestart-DT,a4),a0
+	move.l	(SourceStart-DT,a4),a0
 C12410:
 	move.l	(WORK_END-DT,a4),a2
 	subq.w	#1,a2
@@ -31415,9 +31280,9 @@ C124E2:
 	movem.l	d0-d7/a0-a6,-(sp)
 	moveq	#0,d0
 	lea	(CurrentAsmLine-DT,a4),a0
-	bsr	printthetext
+	bsr	Print_Text
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	movem.l	(sp)+,d0-d7/a0-a6
 	move.l	(FirstLinePtr-DT,a4),a0
 	tst.b	(B30172-DT,a4)
@@ -31440,7 +31305,7 @@ C12516:
 
 C1252E:
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	bclr	#1,(SomeBits3-DT,a4)	;???
 	bclr	#SB2_INSERTINSOURCE,(SomeBits2-DT,a4)
 	bclr	#SB3_EDITORMODE,(SomeBits3-DT,a4)	;uit editor
@@ -31461,13 +31326,13 @@ C12566:
 C12572:
 	move.l	d0,-(sp)
 	moveq	#0,d4
-	move.l	(sourcestart-DT,a4),a6
+	move.l	(SourceStart-DT,a4),a6
 	bra.b	C1259E
 
 C1257C:
 	addq.l	#4,sp
 	lea	(HNoErrors.MSG,pc),a0
-	br	printthetext
+	br	Print_Text
 
 C12586:
 	move.l	(DATA_CURRENTLINE-DT,a4),d4
@@ -31545,7 +31410,7 @@ C12650:
 	move.l	(sp)+,d2
 	move.l	a6,-(sp)
 	bsr	read_nr_d3_bytes
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	move.l	(sp)+,a6
 	subq.w	#1,a6
 	br	C12586
@@ -31560,7 +31425,7 @@ com_terughalen:
 	bne.b	C12676
 	move.b	(a6)+,d0
 C12676:
-	move.l	(sourcestart-DT,a4),a0
+	move.l	(SourceStart-DT,a4),a0
 	cmp.b	#$1A,(a0)
 	bne.b	C12684
 	move.b	#$3B,(a0)+
@@ -31568,7 +31433,7 @@ C12684:
 	pea	(com_AddWorkMem,pc)
 C12688:
 	bclr	#SB2_INDEBUGMODE,(SomeBits2-DT,a4)
-	move.l	(sourcestart-DT,a4),a0
+	move.l	(SourceStart-DT,a4),a0
 	move.l	a0,a2
 	move.l	(WORK_END-DT,a4),a1
 	cmp.l	a0,a1
@@ -31603,19 +31468,19 @@ C126AA:
 	beq.b	C126DC
 	clr.b	(a2)+
 C126DC:
-	move.l	a2,(sourceend-DT,a4)
+	move.l	a2,(SourceEnd-DT,a4)
 	move.b	d0,(a2)+
-	move.l	a2,(Cut_Blok_End-DT,a4)
+	move.l	a2,(Cut_Buffer_End-DT,a4)
 	move.b	d0,(a2)
 	rts
 
 C126EA:
-	move.l	(sourceend-DT,a4),a2
+	move.l	(SourceEnd-DT,a4),a2
 	pea	(ERROR_WorkspaceMemoryFull,pc)
 	moveq	#$1A,d0
 	bra.b	C126DC
 
-C126F6:
+Line_ASCII:
 	clr.b	(B30040-DT,a4)
 	cmp.b	#$7B,(a6)
 	bne.b	C12708
@@ -31646,9 +31511,9 @@ C12740:
 	moveq	#7,d6
 C12744:
 	move.l	a3,d0
-	bsr	Druk_af_D0
+	bsr	Print_D0AndSpace
 	moveq	#$22,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	a3,d5
 	moveq	#$3F,d5
 C12754:
@@ -31662,16 +31527,16 @@ C12754:
 C12768:
 	moveq	#$2E,d0
 C1276A:
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d5,C12754
 	moveq	#$22,d0
-	bsr	SENDONECHARNORMAL
-	bsr	druk_cr_nl
+	bsr	Print_Char
+	bsr	Print_NewLine
 	dbra	d6,C12744
 	move.l	a3,(MEM_DIS_DUMP_PTR-DT,a4)
 	rts
 
-C127AC:
+Insert_HexDump:
 	bsr	C11ABE
 	moveq	#0,d7
 	bsr	INPUTBEGINEND
@@ -31689,7 +31554,7 @@ C127CA:
 	mulu	#7,d4
 	lea	(DCB.MSG,pc),a0
 	add	d4,a0
-	bsr	printthetext
+	bsr	Print_Text
 	moveq	#0,d3
 	moveq	#$10,d5
 	tst	d4
@@ -31699,10 +31564,10 @@ C127EE:
 	tst.b	d3
 	beq.b	C127F8
 	moveq	#$2C,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 C127F8:
 	moveq	#$24,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	(OpperantSize-DT,a4),d4
 	ext.w	d4
 	sub	d4,d5
@@ -31716,14 +31581,14 @@ C12808:
 	moveq	#1,d3
 	tst	d5
 	bne.b	C127EE
-	bsr	Druk_af_eol
+	bsr	Print_EOL
 	bra.b	C127CA
 
 C12822:
-	bsr	Druk_af_eol
+	bsr	Print_EOL
 	br	C128D4
 
-C1282A:
+Insert_ASCII:
 	moveq	#0,d7
 	bsr	INPUTBEGINEND
 	move.l	d2,a3
@@ -31736,7 +31601,7 @@ C12846:
 	cmp.l	a3,a2
 	bls.w	C128CE
 	lea	(DCB.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	moveq	#$2F,d5
 	moveq	#0,d3
 C12858:
@@ -31773,7 +31638,7 @@ C1287E:
 	bra.b	C128BC
 
 C1289A:
-	br	SENDONECHARNORMAL
+	br	Print_Char
 
 C1289E:
 	move	d0,-(sp)
@@ -31801,14 +31666,14 @@ C128C0:
 	moveq	#$27,d0
 	bsr.b	C1289A
 C128CA:
-	br	Druk_af_eol
+	br	Print_EOL
 
 C128CE:
 	bsr.b	C128C0
 	move.l	a3,(MEM_DIS_DUMP_PTR-DT,a4)
 C128D4:
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	(sp)+,(FirstLinePtr-DT,a4)
 	rts
 
@@ -31816,27 +31681,27 @@ com_insert:
 	move.b	(a6)+,d0
 	move.b	d0,d3
 	bclr	#5,d0
-	cmp.b	#$48,d0
-	beq	C127AC
-	cmp.b	#$4E,d0
-	beq	C1282A
-	cmp.b	#$44,d0
+	cmp.b	#"H",d0
+	beq	Insert_HexDump
+	cmp.b	#"N",d0
+	beq	Insert_ASCII
+	cmp.b	#"D",d0
 	beq	Insert_Disassembly
-	cmp.b	#$42,d0
-	beq	C12044
-	cmp.b	#$53,d0
-	beq.b	C12920
-	cmp.b	#$20,d3
-	beq	C1823E
+	cmp.b	#"B",d0
+	beq	Insert_Binary
+	cmp.b	#"S",d0
+	beq.b	Insert_Sine
+	cmp.b	#" ",d3
+	beq	Insert_Source
 	tst.b	d0
 	bne	ERROR_IllegalComman
-	br	C181DA
+	br	QueryInsertSource
 
-C12920:
+Insert_Sine:
 	clr.l	(L2DF4C).l
 	bra.b	C1293A
 
-C12928:
+Create_Sine:
 	lea	(DEST.MSG,pc),a0
 	bsr	Druk_MsgAf_GetNumbr
 	bne	ERROR_Notdone
@@ -31996,15 +31861,15 @@ C12B52:
 	tst	(W2DF4E-DT,a4)
 	bne.b	C12B72
 	lea	(DCB.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	bra.b	C12B78
 
 C12B72:
 	moveq	#$2C,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 C12B78:
 	moveq	#$24,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move	(sp)+,d0
 	bsr	C15908
 	move	(W2DF4E-DT,a4),d0
@@ -32013,7 +31878,7 @@ C12B78:
 	move	d0,(W2DF4E-DT,a4)
 	bne.b	C12B9C
 	moveq	#1,d3
-	bsr	Druk_af_eol
+	bsr	Print_EOL
 	moveq	#0,d3
 C12B9C:
 	cmp.b	#2,(B2DF67-DT,a4)
@@ -32022,15 +31887,15 @@ C12B9C:
 	tst	(W2DF4E-DT,a4)
 	bne.b	C12BB6
 	lea	(DCW.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	bra.b	C12BBC
 
 C12BB6:
 	moveq	#$2C,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 C12BBC:
 	moveq	#$24,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	(sp),d0
 	bsr	C15908
 	move	(sp)+,d0
@@ -32042,7 +31907,7 @@ C12BBC:
 	bne.b	C12BEA
 	clr	(W2DF4E-DT,a4)
 	moveq	#1,d3
-	bsr	Druk_af_eol
+	bsr	Print_EOL
 	moveq	#0,d3
 C12BEA:
 	cmp.b	#3,(B2DF67-DT,a4)
@@ -32051,15 +31916,15 @@ C12BEA:
 	tst	(W2DF4E-DT,a4)
 	bne.b	C12C04
 	lea	(DCL.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	bra.b	C12C0A
 
 C12C04:
 	moveq	#$2C,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 C12C0A:
 	moveq	#$24,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	(sp),d0
 	bsr	C15908
 	move	(sp)+,d0
@@ -32075,7 +31940,7 @@ C12C0A:
 	bne.b	C12C64
 	clr	(W2DF4E-DT,a4)
 	moveq	#1,d3
-	bsr	Druk_af_eol
+	bsr	Print_EOL
 	moveq	#0,d3
 	bra.b	C12C64
 
@@ -32107,10 +31972,10 @@ C12C64:
 	bne.b	C12C9E
 	moveq	#1,d3
 ;	moveq	#0,d0
-;	bsr	SENDONECHARNORMAL
-	bsr	Druk_af_eol
-	bsr	Druk_Clearbuffer
-	bsr	Druk_af_eol
+;	bsr	Print_Char
+	bsr	Print_EOL
+	bsr	Print_ClearBuffer
+	bsr	Print_EOL
 
 C12C9E:
 	move.l	(sp)+,(FirstLinePtr-DT,a4)
@@ -32125,33 +31990,33 @@ Insert_Disassembly:
 	bsr	INPUTBEGINEND
 	bclr	#SB2_INDEBUGMODE,(SomeBits2-DT,a4)
 	cmp	#1,(ProcessorType-DT,a4)
-	bgt.b	C12CC6
+	bgt.b	.skip
 	bclr	#0,d2
-C12CC6:
-	move.l	d2,a5
+
+.skip:	move.l	d2,a5
 	move.l	d0,a3
 	move.l	a5,(INSERT_START-DT,a4)
 	move.l	a3,(INSERT_END-DT,a4)
 	bset	#SB2_INSERTINSOURCE,(SomeBits2-DT,a4)
 	move.l	(FirstLinePtr-DT,a4),-(sp)
-C12CDC:
-	move.l	a5,d0
+
+.loop:	move.l	a5,d0
 	bsr	C158E4
 	moveq	#9,d0
-	bsr	SENDONECHARNORMAL
-	moveq	#9,d0					; 2 tabs
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
+	moveq	#9,d0			; 2 tabs
+	bsr	Print_Char
 	pea.l	(a3)
-	jsr	(C1FE7E).l
-	bsr	printthetext
-	bsr	Druk_af_eol
+	jsr	(Disassemble).l
+	bsr	Print_Text
+	bsr	Print_EOL
 	move.l	(sp)+,a3
 	cmp.l	a3,a5
-	bcs.b	C12CDC
+	bcs.b	.loop
 
 	move.l	a5,(MEM_DIS_DUMP_PTR-DT,a4)
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	bclr	#SB2_INSERTINSOURCE,(SomeBits2-DT,a4)
 	lea	(Removeunusedl.MSG,pc),a0
 	bsr	beeldtextaf
@@ -32202,14 +32067,14 @@ C12D56:
 	bne.b	C12D7A
 	cmp.b	(3,a0),d3
 	bne.b	C12D7A
-	cmp.b	(4,a0),d4				;;
-	bne.b	C12D7A					;;
-	cmp.b	(5,a0),d5				;;
-	bne.b	C12D7A					;;
-	cmp.b	(6,a0),d6				;;
-	bne.b	C12D7A					;;
-	cmp.b	(7,a0),d7				;;
-	bne.b	C12D7A					;;
+	cmp.b	(4,a0),d4
+	bne.b	C12D7A
+	cmp.b	(5,a0),d5
+	bne.b	C12D7A
+	cmp.b	(6,a0),d6
+	bne.b	C12D7A
+	cmp.b	(7,a0),d7
+	bne.b	C12D7A
 	bset	#5,(-3,a0)
 	bra.b	C12D2C
 
@@ -32265,7 +32130,7 @@ C12DC2:
 	bra.b	C12DB8
 
 C12DCA:
-	move.l	(Cut_Blok_End-DT,a4),a0
+	move.l	(Cut_Buffer_End-DT,a4),a0
 	move.l	a3,d1
 	sub.l	a2,d1
 	jsr	(MOVEMARKS).l
@@ -32278,20 +32143,20 @@ LINE_REGPRINT:
 	lea	(D0.MSG,pc),a0
 	lea	(DataRegsStore-DT,a4),a1
 	lea	(DataRegsStore_Old-DT,a4),a2
-	bsr	printthetext
+	bsr	Print_Text
 
 	moveq	#8-1,d3
 .datalopje:
 	bsr	convert_getal
 
-	bsr	druk_af_space
+	bsr	Print_Space
 	dbra	d3,.datalopje
 
-	bsr	printthetext
+	bsr	Print_Text
 	moveq	#7-1,d3
 .adrlopje:
 	bsr	convert_getal
-	bsr	druk_af_space
+	bsr	Print_Space
 	dbra	d3,.adrlopje
 
 	move.l	(a1),d0
@@ -32302,39 +32167,39 @@ LINE_REGPRINT:
 	move.l	(4,a2),d1
 C12E28:
 	bsr	C1326A
-	bsr	druk_af_space
-	bsr	printthetext
+	bsr	Print_Space
+	bsr	Print_Text
 	bsr	convert_getal
-	bsr	druk_af_space
-	bsr	printthetext
+	bsr	Print_Space
+	bsr	Print_Text
 	bsr	convert_getal
-	bsr	druk_af_space
-	bsr	printthetext
+	bsr	Print_Space
+	bsr	Print_Text
 	bsr	C131BE
-	bsr	druk_af_space
+	bsr	Print_Space
 	bsr	C131DA
 	bsr	C131E2
-	bsr	druk_af_space
+	bsr	Print_Space
 	bsr	C1320C
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(a1),a5
 	bsr	debug_regs2old
 	move.l	a5,d0
 	cmp.l	#eop_irq_routine,d0
 	beq	C1315E
 
-	jsr	(druk_af_d0).l
+	jsr	(Print_D0).l
 	tst	(ProcessorType-DT,a4)
 	beq	C12ED8
 	move.l	a0,-(sp)
 	moveq	#$20,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	lea	(VBR.MSG).l,a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(VBR_base_ofzo-DT,a4),d0
 	move.l	(VBR_Base2-DT,a4),d1
 	bsr	C1326A
-	bsr	druk_af_space
+	bsr	Print_Space
 	tst	(FPU_Type-DT,a4)
 	beq.b	C12ED6
 
@@ -32352,20 +32217,20 @@ C12E28:
 C12ED6:
 	move.l	(sp)+,a0
 C12ED8:
-	bsr	druk_cr_nl
-	bsr	printthetext
+	bsr	Print_NewLine
+	bsr	Print_Text
 	move.l	a5,d0
-	bsr	druk_af_d0
-	bsr	druk_af_space
-	bsr	C1588E
+	bsr	Print_D0
+	bsr	Print_Space
+	bsr	Print_ClearScreen
 	jsr	(Diss_zetom2ascii).l
-	bsr	printthetext
-	br	druk_cr_nl
+	bsr	Print_Text
+	br	Print_NewLine
 
 C12EFC:
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	lea	(FPCR.MSG).l,a0
-	bsr	printthetext
+	bsr	Print_Text
 
 	move.l	(fpu_1-DT,a4),d0
 	move.l	(L2F16C-DT,a4),d1
@@ -32378,7 +32243,7 @@ C12EFC:
 	bsr	get_normal_font		;normal
 	moveq	#4,d7
 C12F2A:
-	bsr	druk_af_space
+	bsr	Print_Space
 	dbra	d7,C12F2A
 	lea	(BSUN.MSG).l,a0
 	move.l	(fpu_1-DT,a4),d2
@@ -32392,7 +32257,7 @@ C12F48:
 	move.l	d7,-(sp)
 	moveq	#4,d7
 C12F50:
-	bsr	druk_af_space
+	bsr	Print_Space
 	dbra	d7,C12F50
 	move.l	(sp)+,d7
 	lea	(BSUN.MSG).l,a0
@@ -32403,14 +32268,14 @@ C12F50:
 	br	C13096
 
 C12F70:
-	bsr	Druk_Clearbuffer
-	bsr	druk_cr_nl
+	bsr	Print_ClearBuffer
+	bsr	Print_NewLine
 	lea	(FPSR.MSG).l,a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(fpu_2-DT,a4),d0
 	move.l	(fpu2_old-DT,a4),d1
 	bsr	C1326A
-	bsr	druk_af_space
+	bsr	Print_Space
 	move.l	(fpu_2-DT,a4),d2
 	move.l	(fpu2_old-DT,a4),d3
 	moveq	#15,d1
@@ -32426,7 +32291,7 @@ C12F9E:
 	br	C13096
 
 C12FB4:
-	bsr	printthetext
+	bsr	Print_Text
 	move	(fpu_2-DT,a4),d1
 	move	(fpu2_old-DT,a4),d2
 	cmp	d1,d2
@@ -32440,13 +32305,13 @@ C12FD0:
 	rol.w	#1,d0
 	and	#1,d0
 	add.b	#$30,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	bra.w	C12FE6
 
 C12FE2:
 	bsr	get_normal_font	;normal font
 C12FE6:
-	bsr	printthetext
+	bsr	Print_Text
 	move	(fpu_2-DT,a4),d0
 	move	(fpu2_old-DT,a4),d1
 	and.b	#$7F,d0
@@ -32465,7 +32330,7 @@ C1300E:
 
 C13012:
 	lea	(PRECISION.MSG).l,a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(fpu_1-DT,a4),d1
 	lsr.w	#4,d1
 	move	d1,d2
@@ -32483,8 +32348,8 @@ C13012:
 	beq.b	C13042
 	moveq	#$55,d0
 C13042:
-	bsr	SENDONECHARNORMAL
-	bsr	printthetext
+	bsr	Print_Char
+	bsr	Print_Text
 	move	#$4E52,d0
 	tst.b	d2
 	beq.b	C13066
@@ -32498,11 +32363,11 @@ C13042:
 C13066:
 	move	d0,-(sp)
 	and	#$00FF,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move	(sp)+,d0
 	lsr.w	#8,d0
 	and	#$00FF,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	rts
 
 C1307E:
@@ -32517,7 +32382,7 @@ C1307E:
 C13096:
 	movem.l	d0-d3/d7,-(sp)
 C1309A:
-	bsr	printthetext
+	bsr	Print_Text
 	moveq	#$31,d0
 	btst	d1,d2
 	beq.b	C130C0
@@ -32527,7 +32392,7 @@ C130A8:
 	move	d0,-(sp)
 	bsr	get_inverse_font	;inverse font
 	move	(sp)+,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	bsr	get_normal_font	;normal font
 	subq.w	#1,d1
 	dbra	d7,C1309A
@@ -32538,7 +32403,7 @@ C130C0:
 	btst	d1,d3
 	bne.b	C130A8
 C130C6:
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	subq.w	#1,d1
 	dbra	d7,C1309A
 C130D0:
@@ -32546,13 +32411,13 @@ C130D0:
 	rts
 
 C130D6:
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	lea	(FPIAR.MSG).l,a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(fpu_3-DT,a4),d0
 	move.l	(L2F174-DT,a4),d1
 	bsr	C1326A
-	bsr	druk_af_space
+	bsr	Print_Space
 	rts
 
 C130F6:
@@ -32563,7 +32428,7 @@ C130F6:
 	lea	(FpuRegsStore_Old-DT,a4),a2
 	moveq	#1,d6
 C1310E:
-	bsr	printthetext
+	bsr	Print_Text
 	moveq	#3,d7
 C13114:
 	fmove.x	(a1)+,fp0
@@ -32580,9 +32445,9 @@ C13132:
 C13136:
 	move.l	a0,-(sp)
 	lea	(B30053).l,a0
-	bsr	printthetext
-	bsr	druk_af_space
-	bsr	druk_af_space
+	bsr	Print_Text
+	bsr	Print_Space
+	bsr	Print_Space
 	move.l	(sp)+,a0
 	dbra	d7,C13114
 	dbra	d6,C1310E
@@ -32592,17 +32457,17 @@ C13136:
 
 C1315E:
 	lea	(EOP.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	tst	(ProcessorType-DT,a4)
 	beq.b	C1318C
 	moveq	#$20,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	lea	(VBR.MSG).l,a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(VBR_base_ofzo-DT,a4),d0
 	move.l	(VBR_Base2-DT,a4),d1
 	bsr	C1326A
-	bsr	druk_af_space
+	bsr	Print_Space
 C1318C:
 	tst	(FPU_Type-DT,a4)
 	beq.b	C131BA
@@ -32617,7 +32482,7 @@ C1318C:
 	bsr	C13012
 	bsr	C130F6
 C131BA:
-	br	druk_cr_nl
+	br	Print_NewLine
 
 C131BE:
 	move	(a1)+,d1	;new
@@ -32648,10 +32513,10 @@ C131E2:
 	beq.w	C131F4
 	bsr	get_inverse_font
 C131F4:
-	bsr	printthetext
+	bsr	Print_Text
 	move.b	d1,d0
 	add.b	#$30,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	tst.b	d2
 	beq.w	C1320A
 	bsr	get_normal_font
@@ -32673,12 +32538,12 @@ C13212:
 	move	d0,-(sp)
 	bsr	get_inverse_font
 	move	(sp)+,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	bsr	get_normal_font
 	bra.b	C13234
 
 C13230:
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 C13234:
 	dbra	d3,C13212
 	rts
@@ -32691,17 +32556,17 @@ C1323A:
 C13242:
 	lsl.w	#1,d2
 	bcs.b	C13254
-	bsr	printthetext
-	bsr	druk_af_space
+	bsr	Print_Text
+	bsr	Print_Space
 	move.l	(sp)+,a0
 	addq.w	#6,a0
 	rts
 
 C13254:
 	bsr	get_inverse_font
-	bsr	printthetext
+	bsr	Print_Text
 	bsr	get_normal_font
-	bsr	druk_af_space
+	bsr	Print_Space
 	move.l	(sp)+,a0
 	addq.w	#6,a0
 	rts
@@ -32896,7 +32761,7 @@ srpens:	DC.B    1,0
 	DC.B    1
 	DC.B    0
 sr_x:	DC.W    3,3
-	DC.L	Editor_Font	;xhelvetica11
+	DC.L	Editor_Font	; TOPAZ. FUCK xhelvetica11 !!
 srtxtptr:
 	DC.L    srtxtbuf
 	DC.L    0
@@ -33052,31 +32917,31 @@ convert_getal:
 	cmp.l	(a2)+,d0	;old value
 	bne.b	C132F8		;print inverse
 C132F4:
-	br	druk_af_d0		;print normal
+	br	Print_D0		;print normal
 
 
 C132F8:
 	move.l	d0,-(sp)
 	bsr.b	get_inverse_font	;inverse
 	move.l	(sp)+,d0
-	bsr	druk_af_d0
+	bsr	Print_D0
 	br	get_normal_font		;normal?
 
 get_inverse_font:
 	moveq	#-$65,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$34,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$6D,d0
-	br	SENDONECHARNORMAL
+	br	Print_Char
 
 get_normal_font:
 	moveq	#-$65,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$30,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$6D,d0
-	br	SENDONECHARNORMAL
+	br	Print_Char
 
 debug_regs2old:
 	lea	(DataRegsStore-DT,a4),a1
@@ -33114,7 +32979,7 @@ druk_af_debug_regs:
 	lea	(FpuRegsStore_Old-DT,a4),a2
 	moveq	#7,d3
 .debug_FpuRegs:
-;	bsr	printthetext
+;	bsr	Print_Text
 	bsr	convert_fpgetal_debug		;zet om fpu-regs en display...
 	dbra	d3,.debug_FpuRegs
 	lea	(HA0.MSG,pc),a0
@@ -33165,7 +33030,7 @@ C133D0:
 	cmp.l	#eop_irq_routine,d0
 	beq.b	deb_eop
 	bsr	convert_getal_debug_d0	;PC
-;	bsr	druk_af_d0		;PC
+;	bsr	Print_D0		;PC
 	bra.b	deb_no_eop
 ;	rts
 
@@ -33173,7 +33038,7 @@ deb_eop:
 	move.l	a0,-(sp)
 
 	lea	(EOP.MSG,pc),a0
-;	bsr	printthetext	;PC eop!
+;	bsr	Print_Text	;PC eop!
 	bsr	debug_print_text
 
 	move.l	#adrtxtbuf,adrtxtptr
@@ -33182,12 +33047,12 @@ deb_eop:
 deb_no_eop:
 	tst	(ProcessorType-DT,a4)
 	beq.b	.iseen68000
-;	bsr	printthetext
+;	bsr	Print_Text
 	move.l	(VBR_base_ofzo-DT,a4),d0	;VBR
-;	bsr	druk_af_d0
+;	bsr	Print_D0
 	bsr	convert_getal_debug_d0
 .iseen68000:
-;	bsr	printthetext
+;	bsr	Print_Text
 	move.l	(fpu_2-DT,a4),d0
 ;	move.l	(fpu2_old-DT,a4),d1
 ;	bsr	C1326A
@@ -33262,11 +33127,11 @@ C134F4:
 	clr.b	(a6)
 	bsr.b	C13494
 	move.l	(sp)+,a0
-	bsr	printthetext
-	bsr	druk_af_space
+	bsr	Print_Text
+	bsr	Print_Space
 	move.l	a1,a5
 	bsr	C137CC
-	br	druk_cr_nl
+	br	Print_NewLine
 
 strange_tabled:
 	dc.l	$000C0002
@@ -33297,128 +33162,129 @@ com_calc_float:
 	bsr	C11B36
 	bsr	C15B0A
 	lea	(B30053).l,a0
-	bsr	printthetext
-	bsr	druk_af_space
-	bsr	druk_af_space
-	moveq	#$24,d0		;$
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Text
+	bsr	Print_Space
+	bsr	Print_Space
+	moveq	#"$",d0
+	bsr	Print_Char
 	fmove.d	(D02F260-DT,a4),fp0
 	fmove.s	fp0,(D02F260-DT,a4)
-	moveq	#$53,d0		;S
+	moveq	#"S",d0
 	moveq	#0,d1
 	cmp.b	#$71,(OpperantSize-DT,a4)
 	beq.b	C135DA
 	fmove.d	fp0,(D02F260-DT,a4)
-	moveq	#$44,d0		;D
+	moveq	#"D",d0
 	moveq	#1,d1
 	cmp.b	#$75,(OpperantSize-DT,a4)
 	beq.b	C135DA
 	fmove.x	fp0,(D02F260-DT,a4)
-	moveq	#$58,d0		;X
+	moveq	#"X",d0
 	moveq	#2,d1
 	cmp.b	#$72,(OpperantSize-DT,a4)
 	beq.b	C135DA
 	fmove.p	fp0,(D02F260-DT,a4){#0}
-	moveq	#$50,d0		;P
+	moveq	#"P",d0
 	moveq	#2,d1
 C135DA:
 	move.l	d0,-(sp)
 	lea	(D02F260-DT,a4),a0
 C135E0:
 	move.l	(a0)+,d0
-	bsr	druk_af_d0
+	bsr	Print_D0
 	dbra	d1,C135E0
-	moveq	#$2E,d0		;.
-	bsr	SENDONECHARNORMAL
+	moveq	#".",d0
+	bsr	Print_Char
 	move.l	(sp)+,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	fmove.x	(sp)+,fp0
 	movem.l	(sp)+,d0-d2/a0
-	br	druk_cr_nl
+	br	Print_NewLine
 
 com_calculator:
 	move.l	d0,d1
-	moveq	#$24,d0		;$
-	bsr	SENDONECHARNORMAL
+	moveq	#"$",d0
+	bsr	Print_Char
 	move.l	d1,d0
-	bsr	druk_af_d0
-	bsr	druk_af_space
+	bsr	Print_D0
+	bsr	Print_Space
 	move.l	d1,d0
 	move.l	d1,-(sp)
 	bsr	Druk_D0_inCommandline
 	move.l	(sp)+,d1
-	bsr	druk_af_space
-	moveq	#$22,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Space
+	moveq	#'"',d0
+	bsr	Print_Char
 	movem.l	d1/d2,-(sp)
 	moveq	#3,d2
-C1362E:
+
+.loop:
 	rol.l	#8,d1
 	move.b	d1,d0
 	bclr	#7,d0
-	cmp.b	#$20,d0
-	bcc.b	C13640
-	move.b	#$2E,d1
-C13640:
-	moveq	#0,d0
+	cmp.b	#" ",d0
+	bcc.b	.skip
+	move.b	#".",d1
+
+.skip:	moveq	#0,d0
 	move.b	d1,d0
-	bsr	SENDONECHARNORMAL
-	dbra	d2,C1362E
+	bsr	Print_Char
+	dbra	d2,.loop
+
 	movem.l	(sp)+,d1/d2
-	moveq	#$22,d0
-	bsr	SENDONECHARNORMAL
-	bsr	druk_af_space
-	moveq	#$25,d0
-	bsr	SENDONECHARNORMAL
-	bsr.b	C13666
-	br	druk_cr_nl
+	moveq	#'"',d0
+	bsr	Print_Char
+	bsr	Print_Space
+	moveq	#"%",d0
+	bsr	Print_Char
+	bsr.b	Print_BinaryLong
+	br	Print_NewLine
 
-C13666:
+Print_BinaryLong:
 	rol.l	#8,d1
-	bsr.b	C13684
-	moveq	#$2E,d0
-	bsr	SENDONECHARNORMAL
-	bsr.b	C13684
-	moveq	#$2E,d0
-	bsr	SENDONECHARNORMAL
-	bsr.b	C13684
-	moveq	#$2E,d0
-	bsr	SENDONECHARNORMAL
-	br	C13684
+	bsr.b	Print_BinaryByte
+	moveq	#".",d0
+	bsr	Print_Char
+	bsr.b	Print_BinaryByte
+	moveq	#".",d0
+	bsr	Print_Char
+	bsr.b	Print_BinaryByte
+	moveq	#".",d0
+	bsr	Print_Char
+	br	Print_BinaryByte
 
-C13684:
+Print_BinaryByte:
 	move.l	d1,-(sp)
 	moveq	#1,d0
 	lsr.w	#1,d0
 	roxl.b	#1,d1
-C1368C:
-	beq.b	C136A4
-	bcs.b	C1369A
-	moveq	#$30,d0
-	bsr	SENDONECHARNORMAL
-	lsl.b	#1,d1
-	bra.b	C1368C
 
-C1369A:
-	moveq	#$31,d0
-	bsr	SENDONECHARNORMAL
+.loop:	beq.b	.end
+	bcs.b	.one
+	moveq	#"0",d0
+	bsr	Print_Char
 	lsl.b	#1,d1
-	bra.b	C1368C
+	bra.b	.loop
 
-C136A4:
-	move.l	(sp)+,d1
+.one:	moveq	#"1",d0
+	bsr	Print_Char
+	lsl.b	#1,d1
+	bra.b	.loop
+
+.end:	move.l	(sp)+,d1
 	rol.l	#8,d1
 	rts
 
-com_copy:
+com_copy:	; C
 	bclr	#5,(a6)
-	cmp.b	#$43,(a6)
-	beq	C16EDA
-	cmp.b	#$44,(a6)
-	beq.b	C136F6
-	cmp.b	#$53,(a6)
-	beq	C12928
-	moveq	#0,d7
+	cmp.b	#"C",(a6)
+	beq	CalcCheck
+	cmp.b	#"D",(a6)
+	beq.b	CreateDirectory
+	cmp.b	#"S",(a6)
+	beq	Create_Sine
+
+	moveq	#0,d7			; C - copy mem
 	bsr	INPUTBEGINEND
 	lea	(DEST.MSG,pc),a0
 	bsr	Druk_MsgAf_GetNumbr
@@ -33445,49 +33311,48 @@ C136EE:
 C136F4:
 	rts
 
-C136F6:
+CreateDirectory:			; CD
 	addq.l	#1,a6
 	tst.b	(a6)
-	beq.b	C1373E
-	cmp.b	#$20,(a6)
-	beq.b	C136F6
-	cmp.b	#9,(a6)
-	beq.b	C136F6
+	beq.b	.ask
+	cmp.b	#" ",(a6)
+	beq.b	CreateDirectory
+	cmp.b	#9,(a6)			; TAB
+	beq.b	CreateDirectory
 	tst.b	(a6)
-	beq.b	C13734
+	beq.b	.err
 	lea	(FileNaam-DT,a4),a0
 	bsr	C180CA
-C13714:
+
+.create:
 	move.l	#FileNaam,d1
 	move.l	(DosBase-DT,a4),a6
 	jsr	(_LVOCreateDir,a6)
 	move.l	d0,d1
-	beq.b	C13734
+	beq.b	.err
 	jsr	(_LVOUnLock,a6)
 	lea	(Directorycrea.MSG).l,a0
-	br	beeldtextaf
+	br	beeldtextaf		; print and exit
 
-C13734:
-	lea	(Errorcreating.MSG).l,a0
-	br	beeldtextaf
+.err:	lea	(Errorcreating.MSG).l,a0
+	br	beeldtextaf		; print and exit
 
-C1373E:
-	lea	(DIRECTORYNAME.MSG,pc),a0
+.ask:	lea	(DIRECTORYNAME.MSG,pc),a0
 	bsr	INPUTTEXT
 	tst.b	(CurrentAsmLine-DT,a4)
-	beq.b	C13734
+	beq.b	.err
 	lea	(FileNaam-DT,a4),a1
 
 	lea	(CurrentAsmLine-DT,a4),a0
-C13754:
-	move.b	(a0)+,(a1)+
-	tst.b	(a0)
-	beq.b	C1375C
-	bra.b	C13754
 
-C1375C:
-	clr.b	(a1)
-	bra.b	C13714
+.copy:	move.b	(a0)+,(a1)+
+	tst.b	(a0)
+	beq.b	.done
+	bra.b	.copy
+
+.done:	clr.b	(a1)
+	bra.b	.create
+
 
 com_fill:
 	moveq	#0,d7
@@ -33536,15 +33401,15 @@ C137AC:
 	addq.l	#8,d5
 	addq.l	#8,d5
 	move.l	a5,d0
-	bsr	Druk_af_D0
+	bsr	Print_D0AndSpace
 C137B6:
 	move.l	a5,(MEM_DIS_DUMP_PTR-DT,a4)
 	bsr.b	C137CC
 	tst	d0
-	bne	druk_cr_nl
+	bne	Print_NewLine
 	cmp.l	d5,a5
 	bne.b	C137B6
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	bra.b	C137AC
 
 C137CC:
@@ -33591,9 +33456,9 @@ C13824:
 	move.b	(a5)+,d0
 	bsr	C15908
 	dbra	d3,C13824
-	br	druk_af_space
+	br	Print_Space
 
-C13832:
+Line_Dis:
 	clr.b	(B30040-DT,a4)
 	cmp.b	#$7B,(a6)
 	bne.b	C13844
@@ -33624,15 +33489,24 @@ C1387E:
 	move.l	d0,a5
 	moveq	#11,d5
 C13882:
+	IF	DISLIB
+	movem.l	d0-a6,-(sp)
+	move.l	a5,a1
+	jsr	DL_DisassembleLine
+	movem.l	(sp)+,d0-a6
+	move.l	DL_NextPC,a5
+	ELSE
 	move.l	a5,d0
-	bsr	Druk_af_D0
+	bsr	Print_D0AndSpace
 	move	d5,-(sp)
 	jsr	(Diss_zetom2ascii).l
-	bsr	printthetext
-	bsr	druk_cr_nl
+	bsr	Print_Text
+	bsr	Print_NewLine
 	move	(sp)+,d5
+	ENDIF	; DISLIB
+
 	dbra	d5,C13882
-	move.l	a5,(MEM_DIS_DUMP_PTR-DT,a4)
+.end:	move.l	a5,(MEM_DIS_DUMP_PTR-DT,a4)
 	rts
 
 com_search_in_mem:
@@ -33652,26 +33526,26 @@ C138B8:
 C138C8:
 	move.b	(a6)+,d0
 	beq	C139A0
-	cmp.b	#9,d0
+	cmp.b	#9,d0			; TAB
 	beq.b	C138C8
-	cmp.b	#$20,d0	;sp
+	cmp.b	#$20,d0			; SPC
 	beq.b	C138C8
-	cmp.b	#$22,d0	;"
+	cmp.b	#'"',d0
 	beq.b	C1395C
-	cmp.b	#$27,d0	;'
+	cmp.b	#"'",d0
 	beq.b	C1395C
-	cmp.b	#$60,d0	;`
+	cmp.b	#"`",d0
 	beq.b	C1395C
 	subq.l	#1,a6
 	move.l	a6,d5
 C138F0:
 	move.b	(a6)+,d0
 	beq.b	C1393C
-	cmp.b	#$2E,d0
+	cmp.b	#".",d0
 	beq.b	C13908
-	cmp.b	#$20,d0
+	cmp.b	#" ",d0
 	beq.b	C13940
-	cmp.b	#$2C,d0
+	cmp.b	#",",d0
 	beq.b	C13940
 	bra.b	C138F0
 
@@ -33741,8 +33615,8 @@ C1397A:
 
 asm_druk_illegalopperant:
 	lea	(IllegalOperan.MSG).l,a0
-	bsr	printthetext
-	bsr	druk_cr_nl
+	bsr	Print_Text
+	bsr	Print_NewLine
 	movem.l	(sp)+,d0-d5/a0-a3/a5/a6
 	rts
 
@@ -33775,11 +33649,11 @@ C139C0:
 C139CC:
 	tst.l	d4
 	beq.b	C139D4
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 C139D4:
 	lea	(Not.MSG,pc),a0
-	bsr	printthetext
-	bsr	druk_cr_nl
+	bsr	Print_Text
+	bsr	Print_NewLine
 	movem.l	(sp)+,d0-d5/a0-a3/a5/a6
 	rts
 
@@ -33792,13 +33666,13 @@ C139E6:
 	and	#7,d4
 	bne.b	C13A00
 	move.l	d0,-(sp)
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	move.l	(sp)+,d0
 C13A00:
-	bsr	druk_af_d0
-	bsr	druk_af_space
+	bsr	Print_D0
+	bsr	Print_Space
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	movem.l	(sp)+,d0-d5/a0-a3/a5
 	addq.l	#1,d4
 	bra.b	C139B2
@@ -33828,26 +33702,26 @@ C13A3E:
 C13A4E:
 	subq.l	#1,a1
 	move.l	a1,d0
-	bsr	Druk_af_D0
+	bsr	Print_D0AndSpace
 	subq.l	#1,a2
 	move.l	a2,d0
-	bsr	druk_af_d0
-	bsr	druk_cr_nl
+	bsr	Print_D0
+	bsr	Print_NewLine
 	br	C105DE
 
 com_workspace:				;'=?'
 	bclr	#5,(a6)
-	cmp.b	#$53,(a6)		;S
-	beq	com_PRINT_SYMBOLTABEL
-	cmp.b	#$52,(a6)		;R
+	cmp.b	#"S",(a6)
+	beq	com_PrintSymbolTable
+	cmp.b	#"R",(a6)
 	beq	com_ShowResidentRegisters
-	cmp.b	#$43,(a6)		;C
+	cmp.b	#"C",(a6)
 	beq	com_SetColors	
-	cmp.b	#$41,(a6)		;A
+	cmp.b	#"A",(a6)
 	beq	com_ShowCodeSections
-	cmp.b	#$50,(a6)		;P
+	cmp.b	#"P",(a6)
 	beq.b	com_ShowProjectInfo
-	cmp.b	#$4D,(a6)		;M
+	cmp.b	#"M",(a6)
 	bne	com_AddWorkMem
 	jmp	(C1E5B6).l
 
@@ -33900,14 +33774,14 @@ C13AFC:
 	sub	d7,d6
 	cmp.b	(CurrentSource-DT,a4),d6
 	bne.b	C13B1A
-	move.l	(sourceend-DT,a4),d0
-	sub.l	(sourcestart-DT,a4),d0
+	move.l	(SourceEnd-DT,a4),d0
+	sub.l	(SourceStart-DT,a4),d0
 	bra.b	C13B1E
 
 C13B1A:
 	move.l	(CS_length,a1),d0
 C13B1E:
-	lea	(ABCDEF.MSG).l,a3
+	lea	(HexChars.MSG).l,a3
 	moveq	#7,d6
 C13B26:
 	rol.l	#4,d0
@@ -33955,8 +33829,8 @@ com_AddWorkMem:
 	move.l	(WORK_END-DT,a4),d2
 	lea	(StartEndTotal.MSG,pc),a0
 	bsr.b	C13C0C
-	move.l	(sourcestart-DT,a4),d1
-	move.l	(sourceend-DT,a4),d2
+	move.l	(SourceStart-DT,a4),d1
+	move.l	(SourceEnd-DT,a4),d2
 	bsr.b	C13C08
 	move.l	(LabelStart-DT,a4),d1
 	move.l	(LPtrsEnd-DT,a4),d2
@@ -33976,7 +33850,7 @@ com_AddWorkMem:
 	bsr.b	C13C08
 	move.l	(INCLUDE_CONSUMPTION-DT,a4),d2
 	beq.b	C13C32
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	d2,d0
 	bra.b	C13C24
 
@@ -33984,18 +33858,18 @@ C13C08:
 	cmp.l	d1,d2
 	bls.b	C13C32
 C13C0C:
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	d1,d0
-	jsr	(Druk_af_D0).l
+	jsr	(Print_D0AndSpace).l
 	move.l	d2,d0
-	jsr	(Druk_af_D0).l
+	jsr	(Print_D0AndSpace).l
 	move.l	d2,d0
 	sub.l	d1,d0
 C13C24:
 	move.l	a0,a1
 	jsr	(PI_druklinenr).l
 	move.l	a1,a0
-	br	druk_cr_nl
+	br	Print_NewLine
 
 C13C32:
 	tst.b	(a0)+
@@ -34007,8 +33881,8 @@ W13C38:
 
 C13C3A:
 	cmp.b	#10,d0
-	bne	SENDONECHARNORMAL
-	bsr	SENDONECHARNORMAL
+	bne	Print_Char
+	bsr	Print_Char
 	subq.w	#1,(W13C38).l
 	bne.b	C13C60
 	bsr	Get_me_a_char
@@ -34181,10 +34055,10 @@ C13DCA:
 PtrRegsData	dc.l	0
 
 com_ShowResidentRegisters:
-	movem.l	d0-a6,-(sp)				; ***
+	movem.l	d0-a6,-(sp)
 	btst	#0,(PR_RegsRes).l
 	beq.b	C13DF2
-	tst.l	(L2E4EE-DT,a4)
+	tst.l	(RegsFileBuffer-DT,a4)
 	bne	C13F00
 C13DF2:
 	move.l	#SREGSDATA.MSG,d1
@@ -34212,44 +34086,44 @@ OpenRegsDataFile:
 	tst.l	d0
 	beq	C13F20
 	lea	(ParameterBlok-DT,a4),a0
-	move.l	($007C,a0),(L2F128-DT,a4)
+	move.l	($007C,a0),(RegsFileSize-DT,a4)
 	move.l	(L2F124-DT,a4),d1
 	move.l	(DosBase-DT,a4),a6
 	jsr	(_LVOUnLock,a6)
 	clr.l	(L2F124-DT,a4)
-	move.l	(L2F128-DT,a4),d0
+	move.l	(RegsFileSize-DT,a4),d0
 	moveq.l	#1,d1
 	move.l	(4).w,a6
 	jsr	(_LVOAllocMem,a6)
-	move.l	d0,(L2E4EE-DT,a4)
+	move.l	d0,(RegsFileBuffer-DT,a4)
 	beq	C13F78
 	move.l	PtrRegsData(pc),d1		
 	move.l	#$3ED,d2
 	move.l	(DosBase-DT,a4),a6
 	jsr	(_LVOOpen,a6)
-	move.l	d0,(L2E4F2).l
+	move.l	d0,(RegsFile).l
 	beq	C13F20
 	move.l	d0,d1
-	move.l	(L2E4EE-DT,a4),d2
-	move.l	(L2F128-DT,a4),d3
-	jsr	(_LVORead,a6)			; ***
-	move.l	(L2E4F2).l,d1
-	jsr	(_LVOClose,a6)			; ***
-	clr.l	(L2E4F2).l
-	move.l	(L2E4EE-DT,a4),d0
+	move.l	(RegsFileBuffer-DT,a4),d2
+	move.l	(RegsFileSize-DT,a4),d3
+	jsr	(_LVORead,a6)
+	move.l	(RegsFile).l,d1
+	jsr	(_LVOClose,a6)
+	clr.l	(RegsFile).l
+	move.l	(RegsFileBuffer-DT,a4),d0
 	move.l	d0,(L2E4D2).l
 	move.l	d0,(L2E4D6).l
 	move.l	d0,(L2E4DA).l
 	move.l	d0,(L2E4DE).l
 	move.l	d0,(L2E4E2).l
 	move.l	d0,(L2E4E6).l
-	move.l	d0,(L2E4EA).l
-	add.l	#$00000045,(L2E4D6).l
-	add.l	#$0000008F,(L2E4DA).l
-	add.l	#$00000098,(L2E4DE).l
-	add.l	#$00000880,(L2E4E2).l
-	add.l	#$0000087F,(L2E4E6).l
-	add.l	#$00004922,(L2E4EA).l
+	move.l	d0,(L2E4EA).l		; "bookmarks" in regs file?
+	add.l	#$00000045,(L2E4D6).l	; "	Bit Use"
+	add.l	#$0000008F,(L2E4DA).l	; " Unused"
+	add.l	#$00000098,(L2E4DE).l	; "List of registers ordered..."
+	add.l	#$00000880,(L2E4E2).l	; "ER A"
+	add.l	#$0000087F,(L2E4E6).l	; " "
+	add.l	#$00004922,(L2E4EA).l	; "h  	1E4"
 C13F00:
 	move.l	(Error_Jumpback-DT,a4),(L2F144-DT,a4)
 	lea	(C13F16,pc),a0
@@ -34257,23 +34131,23 @@ C13F00:
 	movem.l	(sp)+,d0-d7/a0-a6
 	bsr	C13FB8
 C13F16:
-	bsr.b	C13F8A
+	bsr.b	FreeRegsFile
 	move.l	(L2F144-DT,a4),(Error_Jumpback-DT,a4)
 	rts
 
 C13F20:
-	move.l	(L2E4EE-DT,a4),a1
-	move.l	(L2F128-DT,a4),d0
+	move.l	(RegsFileBuffer-DT,a4),a1
+	move.l	(RegsFileSize-DT,a4),d0
 	tst.l	d0
 	beq	C13F36
 	move.l	(4).w,a6
 	jsr	(_LVOFreeMem,a6)
 C13F36:
-	clr.l	(L2E4EE-DT,a4)
-	clr.l	(L2F128-DT,a4)
+	clr.l	(RegsFileBuffer-DT,a4)
+	clr.l	(RegsFileSize-DT,a4)
 	lea	(SREGSDATAfile.MSG).l,a0
-	jsr	(printthetext).l
-	movem.l	(sp)+,d0-a6				; ***
+	jsr	(Print_Text).l
+	movem.l	(sp)+,d0-a6
 	rts
 
 __ERROR_IllegalDevice	bra	ERROR_IllegalDevice
@@ -34283,25 +34157,24 @@ __ERROR_EndofFile:	bra	ERROR_EndofFile
 
 C13F78:
 	lea	(Notenoughmemo.MSG).l,a0
-	jsr	(printthetext).l
+	jsr	(Print_Text).l
 	movem.l	(sp)+,d0-d7/a0-a6
 	rts
 
-C13F8A:
-	tst.l	(L2E4EE-DT,a4)
-	beq.b	C13FB6
+FreeRegsFile:
+	tst.l	(RegsFileBuffer-DT,a4)
+	beq.b	.end
 	btst	#0,(PR_RegsRes).l
-	bne.b	C13FB6
-	move.l	(L2E4EE-DT,a4),a1
-	move.l	(L2F128-DT,a4),d0
+	bne.b	.end
+	move.l	(RegsFileBuffer-DT,a4),a1
+	move.l	(RegsFileSize-DT,a4),d0
 	tst.l	d0
-	beq.b	C13FB6
+	beq.b	.end
 	move.l	(4).w,a6
 	jsr	(_LVOFreeMem,a6)
-	clr.l	(L2F128-DT,a4)
-	clr.l	(L2E4EE-DT,a4)
-C13FB6:
-	rts
+	clr.l	(RegsFileSize-DT,a4)
+	clr.l	(RegsFileBuffer-DT,a4)
+.end:	rts
 
 C13FB8:
 	move	(ScreenHight-DT,a4),(W13C38).l
@@ -34320,9 +34193,9 @@ C13FCE:
 	lea	(a6),a1
 C13FEE:
 	move.b	(a1)+,d0
-	cmp.b	#$20,d0
+	cmp.b	#$20,d0			; SPC
 	beq.b	C13FEE
-	cmp.b	#9,d0
+	cmp.b	#9,d0			; TAB
 	beq.b	C13FEE
 	subq.w	#1,a1
 	sf	d3
@@ -34429,7 +34302,7 @@ C140D8:
 	move.l	d0,-(sp)
 	moveq	#0,d0
 	move.b	(a0)+,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	(sp)+,d0
 	addq.l	#1,d0
 	bra.b	C140C6
@@ -34443,17 +34316,17 @@ C140F8:
 	subq.l	#1,d1
 C14108:
 	moveq	#$20,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C14108
 	move.l	(sp)+,d0
 	addq.w	#1,a0
 	bra.b	C140C6
 
 C14118:
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	bset	#SB1_CHANGE_MODE,(SomeBits-DT,a4)
 	move.b	#13,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	bclr	#SB1_CHANGE_MODE,(SomeBits-DT,a4)
 	addq.w	#1,a0
 	moveq	#0,d0
@@ -34469,89 +34342,81 @@ C14118:
 
 C1415A:
 	lea	(Break.MSG).l,a0
-	bsr	printthetext
+	bsr	Print_Text
 C14164:
 	movem.l	(sp)+,d0-d7/a0-a6
 	rts
 
-com_zap:
+com_zap:				; Z
 	move.b	(a6)+,d0
 	bclr	#5,d0
-	cmp.b	#$46,d0
-	bne.b	C1417C
-	jmp	(C1999E).l
+	cmp.b	#"F",d0
+	beq	Zap_File
+	cmp.b	#"L",d0
+	beq	Zap_Lines
+	cmp.b	#"A",d0
+	jsr	Zap_Sections
+	cmp.b	#"I",d0
+	beq.l	Zap_Includes
+	cmp.b	#"B",d0
+	beq.l	Zap_Breakpoints
+	cmp.b	#"S",d0
+	beq.s	Zap_Source
 
-C1417C:
-	cmp.b	#$4C,d0
-	beq	C1450A
-	cmp.b	#$41,d0
-	beq.b	C14196
-	cmp.b	#$49,d0
-	bne.b	C1419C
-	jmp	(ZapIncludes).l
+	jsr	test_debug		; sometimes a6 points to a bad addr
+	bra	ERROR_IllegalComman	; after compiling....
 
-C14196:
-	jmp	(C2994).l
-
-C1419C:
-	cmp.b	#$42,d0
-	bne.b	C141A8
-	jmp	(DEBUG_CLEAR_BP_BUFFER).l
-
-C141A8:
-	cmp.b	#$53,d0
-	bne	ERROR_IllegalComman
+Zap_Source:
 	move.b	(CurrentSource-DT,a4),d0
-	bsr	C141CE
-	bsr	C142A4
-	bsr.b	C14232
+	bsr	SetTitle_Source
+	bsr	CheckUnsaved
+	bsr.b	SetupNewSourceBuffer
 	clr.b	(MenuFileName).l
 	bsr	RESETMENUTEXT2
-C141C8:
-	bsr	C142A4
+;C141C8:
+	bsr	CheckUnsaved
 	rts
 
-C141CE:
+SetTitle_Source:			; d0 = source number
 	movem.l	d0/d1/d7/a0/a1,-(sp)
-	and.l	#$000000FF,d0
+	and.l	#$FF,d0
 	move.b	d0,d1
-	add.b	#$30,d1
-	move.b	d1,(B1F237).l
+	add.b	#$30,d1			; source # to ascii
+	move.b	d1,(SourceNumber.MSG).l
 	cmp.b	(CurrentSource-DT,a4),d0
-	bne.b	C141F2
+	bne.b	.skip			; new source != current source
 	lea	(MenuFileName).l,a0
-	bra.b	C14200
+	bra.b	.C14200
 
-C141F2:
-	lea	(SourcePtrs-DT,a4),a0
+.skip:	lea	(SourcePtrs-DT,a4),a0
 	lsl.l	#8,d0
 	lea	(a0,d0.l),a0
 	lea	(CS_filename,a0),a0
-C14200:
-	lea	(B1F23B).l,a1
-	moveq	#$1D,d7
-	tst.b	(a0)
-	beq.b	C1422A
-C1420C:
-	tst.b	(a0)
-	beq.b	C14218
-	move.b	(a0)+,(a1)+
-	dbra	d7,C1420C
-	bra.b	C14220
 
-C14218:
-	move.b	#$20,(a1)+
-	dbra	d7,C14218
-C14220:
-	move.b	#$20,(a1)+
+.C14200:
+	lea	(SourceNameBuffer).l,a1
+	moveq	#$1D,d7
+	tst.b	(a0)			; no filename?
+	beq.b	.new
+
+.loop:	tst.b	(a0)
+	beq.b	.pad
+	move.b	(a0)+,(a1)+
+	dbra	d7,.loop
+	bra.b	.done
+
+.pad:	move.b	#$20,(a1)+
+	dbra	d7,.pad
+
+.done:	move.b	#$20,(a1)+
 	movem.l	(sp)+,d0/d1/d7/a0/a1
 	rts
 
-C1422A:
-	lea	(Newsourcenona.MSG).l,a0
-	bra.b	C14200
+.new:	lea	(Newsourcenona.MSG).l,a0
+	bra.b	.C14200
 
-C14232:
+
+SetupNewSourceBuffer:
 	moveq	#0,d0
 	move.l	d0,(Mark1set-DT,a4)
 	move.l	d0,(Mark2set-DT,a4)
@@ -34566,123 +34431,121 @@ C14232:
 	bclr	#SB2_INDEBUGMODE,(SomeBits2-DT,a4)
 	move.l	(WORK_START-DT,a4),a0
 	addq.l	#1,a0
-	move.l	a0,(sourcestart-DT,a4)
-	move.l	a0,(sourceend-DT,a4)
+	move.l	a0,(SourceStart-DT,a4)
+	move.l	a0,(SourceEnd-DT,a4)
 	move.l	a0,(FirstLinePtr-DT,a4)
 	addq.w	#1,a0
-	move.l	a0,(Cut_Blok_End-DT,a4)
-	move.b	#$1A,-(a0)
-	move.b	#$19,-(a0)
+	move.l	a0,(Cut_Buffer_End-DT,a4)
+	move.b	#$1A,-(a0)		; EOF
+	move.b	#$19,-(a0)		; BOF
 	move.l	#1,(FirstLineNr-DT,a4)
 	clr.b	(LastFileNaam-DT,a4)
 	movem.l	d7/a1,-(sp)
 	lea	(INCLUDE_DIRECTORY-DT,a4),a1
 	moveq	#$1F,d7
-C14296:
-	move.b	#0,(a1)+
-	dbra	d7,C14296
+
+.loop:	move.b	#0,(a1)+
+	dbra	d7,.loop
+
 	movem.l	(sp)+,d7/a1
 	rts
 
-C142A4:
+CheckUnsaved:
 	btst	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
-	beq.b	C142B4
-	bsr.b	C1430E
+	beq.b	.end
+	bsr.b	QuerySave
 	bclr	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
-C142B4:
-	rts
+.end:	rts
 
-C142B6:
+
+QueryYesNo:
 	btst	#0,(PR_ReqLib).l
-	beq.b	C142C6
-	jmp	(C1F060).l
+	beq.b	.noreq
+	jmp	(ShowYesNoReq).l
 
-C142C6:
-	lea	(Sure.MSG,pc),a0
+.noreq:	lea	(Sure.MSG,pc),a0
 	bsr	beeldtextaf
 	bsr	GetHotKey
-	bra.b	C1434A
+	bra.b	QueryCheckYes
 
-C142D4:
+QueryOverwrite:
 	btst	#0,(PR_ReqLib).l
-	beq.b	C142E4
-	jmp	(C1F030).l
+	beq.b	.noreq
+	jmp	(ShowOverwriteReq).l
 
-C142E4:
-	btst	#SB3_EDITORMODE,(SomeBits3-DT,a4)	;are whe in editor?
-	beq.b	C14302
+.noreq:	btst	#SB3_EDITORMODE,(SomeBits3-DT,a4)	; are whe in editor?
+	beq.b	.cli
 	lea	(Filealreadyex.MSG,pc),a0
 	jsr	(printTextInMenuStrip).l
 	jsr	(GETKEYNOPRINT).l
 	and.b	#$DF,d0
-	bra.b	C1434A
+	bra.b	QueryCheckYes
 
-C14302:
-	lea	(Filealreadyex.MSG,pc),a0
+.cli:	lea	(Filealreadyex.MSG,pc),a0
 	bsr	beeldtextaf
 	bsr.b	GetHotKey
-	bra.b	C1434A
+	bra.b	QueryCheckYes
 
-C1430E:
+QuerySave:
 	btst	#0,(PR_ReqLib).l
-	beq.b	C1431E
-	jmp	(C1F048).l
+	beq.b	.noreq
+	jmp	(ShowSaveReq).l
 
-C1431E:
-	lea	(Sourcenotsave.MSG,pc),a0
+.noreq:	lea	(Sourcenotsave.MSG,pc),a0
 	bsr	beeldtextaf
 	bsr.b	GetHotKey
-	bra.b	C1434A
+	bra.b	QueryCheckYes
 
-C1432A:
+QueryExit:
 	btst	#0,(PR_ReqLib).l
-	beq.b	C1433A
-	jmp	(C1F13A).l
+	beq.b	.noreq
+	jmp	(ShowExitReq).l
 
-C1433A:
-	lea	(ExitorRestart.MSG,pc),a0
+.noreq:	lea	(ExitorRestart.MSG,pc),a0
 	bsr	beeldtextaf
 	bsr.b	GetHotKey
-	cmp.b	#$52,d0
-	beq.b	C1437C
-C1434A:
-	cmp.b	#$59,d0
-	beq.b	C14370
+	cmp.b	#"R",d0			; restart
+	;beq.b	C1437C
+	bne.b	QueryCheckYes
+.end:	rts
+
+QueryCheckYes:
+	cmp.b	#"Y",d0
+	beq.b	MaybeFreeRegsFile
 	jmp	ERROR_Notdone
 
 GetHotKey:
 	bsr	GETKEYNOPRINT
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	and.b	#$DF,d0
 	move	d0,-(sp)
-	bsr	Druk_Clearbuffer
+	bsr	Print_ClearBuffer
 	move	(sp)+,d0
-	bsr	druk_cr_nl
-C14370:
+	bsr	Print_NewLine
+
+MaybeFreeRegsFile:
 	move.b	#1,PR_RegsRes
-	bsr	C13F8A
-C1437C:
+	bsr	FreeRegsFile
 	rts
 
 Filter_inputtext:
 	tst.b	(a5)
-	beq.b	Filter_einderegel
+	beq.b	.end
 	move	#48,d0
-Filter_loopje:
-	move.b	(a5)+,d1
-	beq.b	Filter_eindereg2
+
+.loop:	move.b	(a5)+,d1
+	beq.b	.done
 	btst	#0,(CaseSenceSearch).l
-	bne.b	Filter_UpisLow
+	bne.b	.skip
 	cmp.b	#$61,d1
-	bcs.w	Filter_UpisLow
-	sub.b	#$20,d1		;small letters get big
-Filter_UpisLow:
-	move.b	d1,(a6)+
-	dbra	d0,Filter_loopje
-Filter_eindereg2:
-	clr.b	(a6)
-Filter_einderegel:
-	rts
+	bcs.w	.skip
+	sub.b	#$20,d1			; lower to uppercase
+
+.skip:	move.b	d1,(a6)+
+	dbra	d0,.loop
+
+.done:	clr.b	(a6)
+.end:	rts
 
 com_search:
 	cmp.b	#'@',(a6)
@@ -34701,7 +34564,7 @@ C143C2:
 	bne.b	C143C2
 	subq.l	#1,a0
 	move.b	(a5)+,d2
-	beq	Drukaf_CurrentLine
+	beq	Print_CurrentLine
 C143D6:
 	move.l	a5,a6
 C143D8:
@@ -34723,7 +34586,7 @@ C143F8:
 	move.l	a0,a1
 C143FE:
 	move.b	(a6)+,d0
-	beq	Drukaf_CurrentLine
+	beq	Print_CurrentLine
 	move.b	(a1)+,d1
 	cmp.b	#$61,d1
 	bcs.b	C14410
@@ -34735,26 +34598,26 @@ C14410:
 
 com_top:
 	move.l	#1,(FirstLineNr-DT,a4)
-	move.l	(sourcestart-DT,a4),a0
+	move.l	(SourceStart-DT,a4),a0
 	subq.l	#1,d0
-	bsr	C144E4
-	move.l	a0,(FirstLinePtr-DT,a4)
-	br	C144EA
+	bsr	DownNMinus1Lines
+	;move.l	a0,(FirstLinePtr-DT,a4)
+	br	Print_Line
 
-com_bottom:
+com_bottom:				; B
 	move.b	(a6)+,d0
 	bclr	#5,d0
-	cmp.b	#'M',d0		;M	BM binary memorydump
+	cmp.b	#'M',d0			; BM binary memorydump
 	bne	.nobindump
 	jmp	com_BinDump
 .nobindump:
-	cmp.b	#'S',d0		;S	BS bootblock simulator
+	cmp.b	#'S',d0			; BS bootblock simulator
 	beq.b	Bootblock_simulator
 	moveq	#-1,d0
 	move.l	(FirstLinePtr-DT,a4),a0
 	subq.l	#1,d0
-	bsr	C144D6
-	br	C144EA
+	bsr	DownNLines
+	br	Print_Line
 
 Bootblock_simulator:
 	lea	(BEG.MSG,pc),a0
@@ -34790,93 +34653,90 @@ DoBBSimul:
 	move	d0,($00DFF09A).l
 	br	C17186
 
-C144D6:
-	cmp.b	#$1A,(a0)
-	beq.b	C144E8
-C144DC:
-	tst.b	(a0)+
-	bne.b	C144DC
-	addq.l	#1,(FirstLineNr-DT,a4)
-C144E4:
-	dbra	d0,C144D6
-C144E8:
+DownNLines:
+	cmp.b	#$1A,(a0)		; EOF
+	bne.b	.loop
 	rts
 
-C144EA:
+.loop:	tst.b	(a0)+
+	bne.b	.loop
+	addq.l	#1,(FirstLineNr-DT,a4)
+
+DownNMinus1Lines:
+	dbra	d0,DownNLines
+	rts
+
+Print_Line:
 	move.l	a0,(FirstLinePtr-DT,a4)
-Drukaf_CurrentLine:
+Print_CurrentLine:
 	move.l	(FirstLineNr-DT,a4),d0
-	bsr	DrukAf_LineNrPrint
+	bsr	Print_LineNumber
 	move.l	(FirstLinePtr-DT,a4),a0
 	cmp.b	#$1A,(a0)
 	beq	__ERROR_EndofFile
-	bsr	printthetext
-	br	druk_cr_nl
+	bsr	Print_Text
+	br	Print_NewLine
 
-C1450A:
+Zap_Lines:
 	bclr	#SB2_INDEBUGMODE,(SomeBits2-DT,a4)
 	bsr	GETNUMBERAFTEROK
 	move	d0,d5
-	beq.b	C14528
-	bsr	C142B6
+	beq.b	.skip
+	bsr	QueryYesNo
 	subq.w	#1,d5
 	moveq	#1,d4
 	cmp	#$0014,d5
-	bcs.b	C14528
+	bcs.b	.skip
 	subq.w	#1,d4
-C14528:
-	move.l	(FirstLinePtr-DT,a4),a0
-C1452C:
-	tst	d4
-	beq.b	C1454C
+.skip:	move.l	(FirstLinePtr-DT,a4),a0
+
+.loop:	tst	d4
+	beq.b	.ws			; EOL
 	move.l	a0,-(sp)
 	lea	(Zap.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(sp),a0
-	cmp.b	#$1A,(a0)
-	beq.b	C14546
-	bsr	printthetext
-C14546:
-	bsr	druk_cr_nl
+	cmp.b	#$1A,(a0)		; EOF
+	beq.b	.skip2
+	bsr	Print_Text
+
+.skip2:	bsr	Print_NewLine
 	move.l	(sp)+,a0
-C1454C:
-	cmp.b	#$20,(a0)+
-	bcc.b	C1454C
-	cmp.b	#9,(-1,a0)
-	beq.b	C1454C
-	cmp.b	#$1A,(-1,a0)
-	beq.b	C1456A
-	dbra	d5,C1452C
-	bsr.b	C14572
-	bra.b	Drukaf_CurrentLine
 
-C1456A:
-	subq.l	#1,a0
-	bsr.b	C14572
-	br	Drukaf_CurrentLine
+.ws:	cmp.b	#$20,(a0)+		; SPC
+	bcc.b	.ws
+	cmp.b	#9,(-1,a0)		; TAB
+	beq.b	.ws
+	cmp.b	#$1A,(-1,a0)		; EOF
+	beq.b	.eof
+	dbra	d5,.loop
+	bsr.b	.done
+	bra.b	Print_CurrentLine
 
-C14572:
-	move.l	a0,a1
+.eof:	subq.l	#1,a0
+	bsr.b	.done
+	br	Print_CurrentLine
+
+.done:	move.l	a0,a1
 	move.l	(FirstLinePtr-DT,a4),a0
-	move.l	(sourceend-DT,a4),d0
-	sub.l	a1,d0
+	move.l	(SourceEnd-DT,a4),d0
+	sub.l	a1,d0			; after EOF?
 	bmi.w	__ERROR_EndofFile
-C14582:
-	move.b	(a1)+,(a0)+
+
+.loop2:	move.b	(a1)+,(a0)+
 	subq.l	#1,d0
-	bpl.b	C14582
-	move.l	a0,(Cut_Blok_End-DT,a4)
+	bpl.b	.loop2
+	move.l	a0,(Cut_Buffer_End-DT,a4)
 	subq.l	#1,a0
-	move.l	a0,(sourceend-DT,a4)
+	move.l	a0,(SourceEnd-DT,a4)
 	rts
 
-FileReqStuff:
+ShowFileReq:
 	btst	#0,(PR_ReqLib).l
-	beq.b	.NoReqLib
+	beq.b	.noreq
 	jmp	(YesReqLib).l
 
-.NoReqLib:
-	lea	(REQ_TYPES,pc),a0
+.noreq:	lea	(REQ_TYPES,pc),a0
 	add	d0,a0
 	move.b	(a0),d0
 	beq.b	.NORMAL_NAME
@@ -34884,95 +34744,94 @@ FileReqStuff:
 	beq.b	.NORMAL_NAME_2
 	lea	(DIR_ARRAY3-DT,a4),a1
 	lea	(FILE_ARRAY3-DT,a4),a0
-	bra.b	C145CE
+	bra.b	.C145CE
 .NORMAL_NAME_2:
 	lea	(DIR_ARRAY2-DT,a4),a1
 	lea	(FILE_ARRAY2-DT,a4),a0
-	bra.b	C145F8
+	bra.b	.C145F8
 .NORMAL_NAME:
 	lea	(DIR_ARRAY-DT,a4),a1
-;;
-;	jsr	test1
 	move.l	d0,-(sp)
 	moveq.l	#0,d0
 	move.b	(CurrentSource-DT,a4),d0
-	lsl.l	#7,d0			;DSIZE = 128
+	lsl.l	#7,d0			; DSIZE = 128
 	lea	(a1,d0.l),a1
 	move.l	(sp)+,d0
 
 	lea	(MenuFileName,pc),a0
-C145CE:
+.C145CE:
 	btst	#0,(PR_SourceExt).l
-	beq.b	C145F8
+	beq.b	.C145F8
 	move.l	a0,-(sp)
-C145DA:
+.C145DA:
 	move.b	(a0)+,d0
-	beq.b	C145E6
+	beq.b	.C145E6
 	cmp.b	#$2E,d0
-	bne.b	C145DA
-	bra.b	C145F6
+	bne.b	.C145DA
+	bra.b	.C145F6
 
-C145E6:
+.C145E6:
 	subq.l	#1,a0
 	move.l	a1,-(sp)
 	lea	(S.MSG).l,a1
-C145F0:
+.C145F0:
 	move.b	(a1)+,(a0)+
-	bne.b	C145F0
+	bne.b	.C145F0
 	move.l	(sp)+,a1
-C145F6:
+.C145F6:
 	move.l	(sp)+,a0
-C145F8:
+
+.C145F8:
 	movem.l	a0/a1,-(sp)
 	move.l	a0,-(sp)
 	tst.b	(a1)
-	beq.b	C14618
-	bsr.b	C14678
+	beq.b	.C14618
+	bsr.b	KEYBUFFERPUTSTR
 	cmp.b	#$3A,(-1,a1)
-	beq.b	C14618
+	beq.b	.C14618
 	moveq	#$2F,d0
 	cmp.b	(-1,a1),d0
-	beq.b	C14618
+	beq.b	.C14618
 	bsr	KEYBUFFERPUTCHAR
-C14618:
+
+.C14618:
 	move.l	(sp),a1
-	bsr.b	C14678
+	bsr.b	KEYBUFFERPUTSTR
 	move.l	(sp)+,a0
 	move.l	a1,d1
-C14620:
+.C14620:
 	cmp.l	a0,a1
-	beq.b	C14636
+	beq.b	.C14636
 	cmp.b	#$2E,-(a1)
-	bne.b	C14620
+	bne.b	.C14620
 	sub.l	a1,d1
-C1462C:
+.C1462C:
 	moveq	#2,d0
-	bsr	C17412
+	bsr	KEYBUFFERPUTESC
 	subq.w	#1,d1
-	bne.b	C1462C
-C14636:
+	bne.b	.C1462C
+.C14636:
 	lea	(FILENAME.MSG,pc),a0
 	bsr.b	INPUTTEXT
 	lea	(CurrentAsmLine-DT,a4),a0
 	tst.b	(a0)
 	beq	_ERROR_Notdone
 	movem.l	(sp)+,d1/a2
-C1464A:
+.C1464A:
 	move.l	d1,a1
 	move.l	a2,d2
-C1464E:
+.C1464E:
 	move.b	(a0)+,d0
-	beq.b	C14664
+	beq.b	.done
 	move.b	d0,(a1)+
 	move.b	d0,(a2)+
-	cmp.b	#$2F,d0
-	beq.b	C1464A
-	cmp.b	#$3A,d0
-	beq.b	C1464A
-	bra.b	C1464E
+	cmp.b	#"/",d0
+	beq.b	.C1464A
+	cmp.b	#":",d0
+	beq.b	.C1464A
+	bra.b	.C1464E
 
-C14664:
-	clr.b	(a1)+
+.done:	clr.b	(a1)+
 	move.l	d2,a2
 	clr.b	(a2)
 	rts
@@ -34993,25 +34852,24 @@ REQ_TYPES:
 	dc.b	00
 
 
-C14678:
-	move.b	(a1)+,d0
-	beq.b	C14682
+KEYBUFFERPUTSTR:
+.loop:	move.b	(a1)+,d0
+	beq.b	.end
 	bsr	KEYBUFFERPUTCHAR
-	bra.b	C14678
+	bra.b	.loop
 
-C14682:
-	subq.w	#1,a1
+.end:	subq.w	#1,a1
 	rts
 
 INPUTTEXT:
-	bsr	printthetext
+	bsr	Print_Text
 INPUTTEXT_NOTEXT:
 	movem.l	a0/a3/a5/a6,-(sp)
 	bsr.b	get_text_invoer_menuCmd
 	movem.l	(sp)+,a0/a3/a5/a6
 	bsr.b	C146A6
 	move	d0,-(sp)
-	bsr	druk_cr_nl		;NEWLINE
+	bsr	Print_NewLine
 	clr	d0
 	bsr	Druk_char_af2
 	move	(sp)+,d0
@@ -35027,7 +34885,7 @@ C146A6:
 ;********** DRUK TEXT IN MENU BALK en commandstuff**********
 
 Druk_CmdMenuText:
-	bsr	printthetext
+	bsr	Print_Text
 	movem.l	a0/a3/a5/a6,-(sp)
 	bsr.b	get_text_invoer_menuCmd
 	movem.l	(sp)+,a0/a3/a5/a6
@@ -35035,7 +34893,7 @@ Druk_CmdMenuText:
 
 	;move	d0,-(sp)
 	;moveq	#13,d0
-	;bsr	SENDONECHARNORMAL
+	;bsr	Print_Char
 	;clr	d0
 	;bsr	Druk_char_af2
 	;move	(sp)+,d0
@@ -35101,12 +34959,12 @@ CL_ClearCommandline:
 	cmp.l	a0,a6
 	beq.b	.DontClear
 	move.l	(sp)+,a0
-	bsr	CL_Clear_the_line		;clear line?
+	bsr	CL_Clear_the_line
 	br	CL_DeleteBol
 
 .DontClear:
 	move.l	(sp)+,a0
-	br	CL_NormalChar		;comm <-> editor
+	br	CL_NormalChar		; comm <-> editor
 
 CL_NotEscCode:
 	cmp.b	#8,d0
@@ -35125,35 +34983,38 @@ CL_normalchar:
 	move.l	a6,a0
 	addq.l	#1,a6			; insertpos
 	addq.l	#1,a3			; length
-.copylopje:
-	move.b	(a0),d1
+
+.loop:	move.b	(a0),d1
 	move.b	d0,(a0)+
 
 	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
-	beq.s	.norm
-	bsr	show_char_in_balk	;in balk dus
-	bra.w	.klaar
-.norm:
-	bsr	Druk_char_af2
-.klaar:
-	move.b	d1,d0
+	beq.s	.skip
+
+	bsr	Print_CharInMenubar	;in balk dus
+	bra.w	.done
+
+.skip:	bsr	Druk_char_af2
+.done:	move.b	d1,d0
 	cmp.l	a3,a0
-	bne.b	.copylopje
+	bne.b	.loop
 
 	moveq.l	#0,d0
 	bsr	Druk_char_af2
 
 cl_lastpart:
 	cmp.l	a6,a0
-	beq.b	KlaarCommandline
+	beq.b	.end
+
 	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
-	bne.s	.klaar4
+	bne.s	.skip
 
 	moveq	#8,d0
 	bsr	Druk_char_af2
-.klaar4:
-	subq.l	#1,a0
+
+.skip:	subq.l	#1,a0
 	bra.b	cl_lastpart
+
+.end:	rts
 
 CL_Delete2EOL:
 	move.l	a6,a3
@@ -35161,16 +35022,16 @@ CL_Delete2EOL:
 
 CL_Delete:
 	cmp.l	a3,a6
-	beq.b	KlaarCommandline
+	beq.b	.end
 	move.l	a6,a0
 	addq.l	#1,a0
 	bra.w	GoOnCommandline
+.end:	rts
 
 CL_DeleteBol:
 	bsr.w	CL_BSCommandline
 	cmp.l	a5,a6
 	bne.b	CL_DeleteBol
-KlaarCommandline:
 	rts
 
 
@@ -35201,13 +35062,16 @@ CL_DeleteWordForward:				; TODO: THIS DOESN'T WORK
 back_menub:
 	subq.w	#1,(menu_char_pos-DT,a4)
 	move.l	#-1,d0			; signal a backspace
-	bsr	show_char_in_balk
+	bsr	Print_CharInMenubar
 	bra.b	GoOnCommandline
 	
 CL_BSCommandline:
 	cmp.l	a5,a6
-	beq.w	KlaarCommandline
-	move.l	a6,a0
+	bne.s	.skip
+	rts
+	;beq.w	KlaarCommandline
+
+.skip:	move.l	a6,a0
 	subq.l	#1,a6
 
 	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
@@ -35218,26 +35082,23 @@ CL_BSCommandline:
 
 GoOnCommandline:
 	cmp.l	a0,a3
-	beq.b	C147DA
+	beq.b	.done
 	move.b	(a0)+,d0
 	move.b	d0,(-2,a0)
 
 	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
-	beq.s	.nomenub
-	bsr	show_char_in_balk
-	bra.b	.klaar5
-.nomenub:
-	bsr	Druk_char_af2
-.klaar5:
-	bra.b	GoOnCommandline
+	beq.s	.skip
+	bsr	Print_CharInMenubar
+	bra.b	.next
+.skip:	bsr	Druk_char_af2
+.next:	bra.b	GoOnCommandline
 
-C147DA:
-	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
-	bne.s	.klaar6
+.done:	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
+	bne.s	.end
 	moveq	#' ',d0
 	bsr	Druk_char_af2
-.klaar6:
-	subq.l	#1,a3
+
+.end:	subq.l	#1,a3
 	bra.w	cl_lastpart
 
 CL_SmallEscFound:
@@ -35246,7 +35107,7 @@ CL_NormalChar:
 	move.l	a3,a6
 	clr.b	(a6)
 	addq.w	#4,sp
-	br	INPUT_FILLINDAIRY
+	br	INPUT_FILLINDIARY
 ;;
 CL_Clear_the_line:	;bij ESC in de Cmdline
 	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
@@ -35277,53 +35138,55 @@ CL_Clear_the_line:	;bij ESC in de Cmdline
 
 CL_Shift_RightArrow:	;shift ->
 	cmp.l	a6,a3
-	beq.w	KlaarCommandline
-
+	beq.s	.end
 
 	move.b	(a6)+,d0
-
 	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
-	beq.s	.nomenu
-	bsr	show_char_in_balk
+	beq.s	.skip
+
+	bsr	Print_CharInMenubar
 	bra.b	CL_Shift_RightArrow
-.nomenu:
-	bsr	Druk_char_af2
+
+.skip:	bsr	Druk_char_af2
 	bra.b	CL_Shift_RightArrow
+
+.end:	rts
 
 CL_RightArrow:	;->
 	cmp.l	a6,a3
-	beq.w	KlaarCommandline
+	beq.w	.end
 	
 	move.b	(a6)+,d0
 	btst    #MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
-	bne.w	show_char_in_balk
+	bne.w	Print_CharInMenubar
 	br	Druk_char_af2
+.end:	rts
 
 CL_Shift_LeftArrow:	;shift '<-'
 	cmp.l	a6,a5
-	beq.w	KlaarCommandline
+	beq.s	.end
 
 	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
 	bne.w	CL_DeleteBol
-
 
 	moveq	#8,d0
 	bsr	Druk_char_af2
 	subq.l	#1,a6
 	bra.b	CL_Shift_LeftArrow
+.end:	rts
 
 CL_LeftArrow: ;<-
 	cmp.l	a6,a5
-	beq.w	KlaarCommandline
+	beq.w	.end
 
 	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
 	bne.w	CL_BSCommandline
 
-	moveq	#8,d0		;BS
+	moveq	#8,d0			; BS
 	bsr	Druk_char_af2
 
 	subq.l	#1,a6
-	rts
+.end:	rts
 
 
 
@@ -35339,8 +35202,8 @@ History_stuff:
 	lea	(L2A1B6-DT,a4),a0
 	move	#COMMANDLINECACHESIZE-1,d1
 .hist_lopje:
-	add	d2,(DAIRYOUT-DT,a4)
-	move	(DAIRYOUT-DT,a4),d0
+	add	d2,(DIARYOUT-DT,a4)
+	move	(DIARYOUT-DT,a4),d0
 ;	and	#(COMMANDLINECACHESIZE-1)*64,d0		;buffersize (cycle it)
 ;	and	#$3c0,d0		;buffersize (cycle it)
 	tst.w	d0
@@ -35351,7 +35214,7 @@ History_stuff:
 	blt.b	.o2
 	move.w	#(COMMANDLINECACHESIZE-1)*64,d0
 .o2
-	move.w	d0,(DAIRYOUT-DT,a4)
+	move.w	d0,(DIARYOUT-DT,a4)
 
 	tst.b	(a0,d0.w)
 	bne.b	.Druk_hist_buf_line
@@ -35401,7 +35264,7 @@ C14882:
 
 	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
 	beq.s	.nomenub
-	bsr	show_char_in_balk
+	bsr	Print_CharInMenubar
 	bra.b	.klaar
 .nomenub:
 	bsr	Druk_char_af2
@@ -35422,12 +35285,12 @@ C14898:
 	movem.l	(sp)+,d0-d2/a0/a1
 	rts
 
-INPUT_FILLINDAIRY:
+INPUT_FILLINDIARY:
 	movem.l	d0/d1/a0/a1,-(sp)
 	lea	(CurrentAsmLine-DT,a4),a1
 	tst.b	(a1)
 	beq.b	C148CC
-	move	(DAIRYIN-DT,a4),d0
+	move	(DIARYIN-DT,a4),d0
 ;	and	#(COMMANDLINECACHESIZE-1)*64,d0			;cycle it
 	tst.w	d0
 	bpl.w	.o
@@ -35445,8 +35308,8 @@ C148BA:
 	move.b	(a1)+,(a0)+
 	dbra	d1,C148BA
 	add	#$0040,d0
-	move	d0,(DAIRYIN-DT,a4)
-	move	d0,(DAIRYOUT-DT,a4)
+	move	d0,(DIARYIN-DT,a4)
+	move	d0,(DIARYOUT-DT,a4)
 C148CC:
 	movem.l	(sp)+,d0/d1/a0/a1
 	rts
@@ -35486,11 +35349,11 @@ C14950:
 putThetextInMenubar:
 	movem.l	d1-d6/a0-a3/a5/a6,-(sp)
 	move.l	(MainWindowHandle-DT,a4),a1
-	bset	#0,($0019,a1)		;rmbtrap
+	bset	#0,($0019,a1)		; rmbtrap
 
 	clr.w	(menu_char_pos-DT,a4)
 
-	bsr	show_txt_in_balk
+	bsr	Print_TextInMenubar
 
 	move	(cursor_row_pos-DT,a4),-(sp)
 	move	(Cursor_col_pos-DT,a4),-(sp)
@@ -35507,37 +35370,36 @@ putThetextInMenubar:
 	bclr	#SB2_REVERSEMODE,(SomeBits2-DT,a4)
 
 	move.l	(MainWindowHandle-DT,a4),a1
-	bclr	#0,($0019,a1)		;klaar rmb trap
+	bclr	#0,($0019,a1)		; clear rmb trap
 	movem.l	(sp)+,d1-d6/a0-a3/a5/a6
 	cmp.b	#13,d0
 	rts
 
 GetNrFromTitle:
 	bsr	putThetextInMenubar
-	bne.b	C149EC
+	bne.b	.exit
 	lea	(CurrentAsmLine-DT,a4),a0
 	moveq	#0,d0
 	moveq	#$30,d1
 	moveq	#10,d2
 	moveq	#0,d3
-C149DA:
-	move.b	(a0)+,d3
+
+.loop:	move.b	(a0)+,d3
 	sub.b	d1,d3
 	cmp.b	d2,d3
-	bcc.b	C149E8
+	bcc.b	.done
 	mulu	d2,d0
 	add.l	d3,d0
-	bra.b	C149DA
+	bra.b	.loop
 
-C149E8:
-	moveq	#$61,d1
+.done:	moveq	#$61,d1
 	rts
 
-C149EC:
-	moveq	#0,d1
+.exit:	moveq	#0,d1
 	rts
 
-C149F0:
+
+printCharInMenuStrip:
 	lea	(MENUCHAR_TEXTBUFFER-DT,a4),a0
 	move.b	d0,(a0)
 	bra.b	druk_menu_txt_verder
@@ -35548,7 +35410,7 @@ printTextInMenuStrip:
 druk_menu_txt_verder:
 	movem.l	d0-d6/a0-a3/a5/a6,-(sp)
 	
-	bsr	show_txt_in_balk
+	bsr	Print_TextInMenubar
 	
 	bset	#SB1_WINTITLESHOW,(SomeBits-DT,a4)	;get old title back
 
@@ -35561,7 +35423,7 @@ titletxt:
 	even
 
 
-show_char_in_balk:
+Print_CharInMenubar:
 	movem.l	d0/d1/a0-a3/a6,-(sp)
 	lea	titletxt,a1
 	move.l	a1,-(sp)
@@ -35583,7 +35445,7 @@ show_char_in_balk:
 	bra.b	show_title_ding
 	
 
-show_txt_in_balk:
+Print_TextInMenubar:
 	movem.l	d0/d1/a0-a3/a6,-(sp)
 
 	lea	titletxt,a1
@@ -35591,10 +35453,10 @@ show_txt_in_balk:
 
 	add.w	(menu_char_pos-DT,a4),a1	;col pos
 	moveq.l	#-1,d0
-.lopje:
-	addq.l	#1,d0
+
+.loop:	addq.l	#1,d0
 	move.b	(a0)+,(a1)+
-	bne.s	.lopje
+	bne.s	.loop
 
 	;subq.l	#1,a1
 	;move.b	#$7f,(a1)+		; add block "cursor"
@@ -35632,10 +35494,11 @@ C14A84:
 
 ;**************** DRUK TEXT IN COMMAND SHELL *******************
 
-Druk_regel_in_commandshell:
+CS_PrintLine:
 	movem.l	d0-d7/a0-a3/a5/a6,-(sp)
 	tst.l	d3
-	beq.b	C14B54
+	beq.b	.end
+
 .menustate:
 	move.l	(MainWindowHandle-DT,a4),a1
 	btst	#7,($001A,a1)		;menustate
@@ -35645,8 +35508,8 @@ Druk_regel_in_commandshell:
 	jsr	Show_Cursor
 	bsr	Print_d3_chars
 	jsr	Show_Cursor
-C14B54:
-	movem.l	(sp)+,d0-d7/a0-a3/a5/a6
+
+.end:	movem.l	(sp)+,d0-d7/a0-a3/a5/a6
 	rts
 
 
@@ -35669,11 +35532,11 @@ Print_d3_chars:
 	mulu.w	(EFontSize_y-DT,a4),d1
 
 	add.w	(Scr_Title_sizeTxt-DT,a4),d1	;!2
-	jsr	(_LVOMove,a6)		; ***
+	jsr	(_LVOMove,a6)
 
 	movem.l	(sp)+,d0-a6
 
-	lea	(regel_buffer-DT,a4),a1		;command
+	lea	(line_buffer-DT,a4),a1	; command
 print_char_CL:
 	moveq	#0,d0
 	move.b	(a0)+,d0
@@ -35682,34 +35545,34 @@ print_char_CL:
 	cmp.b	#' ',d0
 	bcs.w	text_white_space
 
-	move.b	d0,(a1)+			;stop char in buffer
+	move.b	d0,(a1)+		; stop char in buffer
 
 	addq.w	#1,d6
-	cmp	(Scr_br_chars-DT,a4),d6	;buffer is ook maar 256 bytes..
+	cmp	(Scr_br_chars-DT,a4),d6	; buffer is only 256 bytes..
 	bne.b	nog_niet_scrollen
-CR_DUS_NEXT_REGEL:
 
+CR_DUS_NEXT_REGEL:
 	movem.l	d0-a6,-(sp)
-	lea	(regel_buffer-DT,a4),a0		;command
+	lea	(line_buffer-DT,a4),a0	; command
 	move.l	a1,d0
-	sub.l	a0,d0		;count
+	sub.l	a0,d0			; count
 
 	cmp.l	#255,d0
 	bhi.s	.noprobs
 
 	move.l	(GfxBase-DT,a4),a6
 	move.l	(Rastport-DT,a4),a1
-	jsr	(_LVOText,a6)		; ***
+	jsr	(_LVOText,a6)
 .noprobs:
 	movem.l	(sp)+,d0-a6
 
-	lea	(regel_buffer-DT,a4),a1		;command
+	lea	(line_buffer-DT,a4),a1	; command
 
 	moveq	#0,d6
 	addq.w	#2,d7
 	cmp	(Max_Hoogte-DT,a4),d7
 	bne.b	alleen_CL_movecurs
-	move	(aantal_regels_min3_div2-DT,a4),d7	;buiten het scherm dus scrollen
+	move	(aantal_regels_min3_div2-DT,a4),d7	; scroll outside of screen
 	bsr	scroll_up_cmdmode
 
 ;2de kolom..
@@ -35724,32 +35587,32 @@ alleen_CL_movecurs:
 	lsr.w	#1,d1		;*8
 	mulu.w  (EFontSize_y-DT,a4),d1
 
-	add.w	(Scr_Title_sizeTxt-DT,a4),d1	;!2
-	jsr	(_LVOMove,a6)	; ***
+	add.w	(Scr_Title_sizeTxt-DT,a4),d1	; !2
+	jsr	(_LVOMove,a6)
 	movem.l	(sp)+,d0-a6
 
 nog_niet_scrollen:
 	dbf	d3,print_char_CL
 
 	movem.l	d0-a6,-(sp)
-	lea	(regel_buffer-DT,a4),a0		;command
+	lea	(line_buffer-DT,a4),a0	; command
 	move.l	a1,d0
-	sub.l	a0,d0		;count
+	sub.l	a0,d0			; count
 
 	cmp.l	#255,d0
 	bhi.s	.probs
 
 	move.l	(GfxBase-DT,a4),a6
 	move.l	(Rastport-DT,a4),a1
-	jsr	(_LVOText,a6)		; ***
+	jsr	(_LVOText,a6)
 
 .probs:
 	movem.l	(sp)+,d0-a6
 
-	lea	(regel_buffer-DT,a4),a1		;command
+	lea	(line_buffer-DT,a4),a1	; command
 CL_cursorstuff:
-	move	d6,(Cursor_col_pos-DT,a4)	;x
-	move	d7,(cursor_row_pos-DT,a4)	;y
+	move	d6,(Cursor_col_pos-DT,a4)	; x
+	move	d7,(cursor_row_pos-DT,a4)	; y
 	rts
 
 text_white_space:
@@ -35793,79 +35656,79 @@ text_offset_stuff:
 ;	addq.l	#1,a0
 	subq.w	#1,d3
 	bmi.w	CL_cursorstuff
-C14EC0:
+.C14EC0:
 	moveq	#0,d1
-C14EC2:
+.C14EC2:
 	moveq	#0,d0
 	move.b	(a0)+,d0
-	cmp.b	#':',d0		;':'  0..9
-	bcc.b	C14EE4
-	cmp.b	#'/',d0		;'/'
+	cmp.b	#':',d0			; 0..9
+	bcc.b	.C14EE4
+	cmp.b	#'/',d0
 	bls.w	nog_niet_scrollen
 	sub	#$30,d0
 	mulu	#10,d1
 	add	d0,d1
-	dbra	d3,C14EC2
+	dbra	d3,.C14EC2
 	bra.w	CL_cursorstuff
 
-C14EE4:
-	cmp.b	#';',d0		;';'
-	beq.b	C14F4C
-	cmp.b	#'H',d0		;'H' ->
-	beq.b	C14F32
-	cmp.b	#'K',d0		;'K'
-	beq.b	C14F72
-	cmp.b	#'D',d0		;'D' <-
-	beq.b	pijl_terug_CL
-	cmp.b	#'m',d0		;'m' inverse
-	beq.b	C14F0E
+.C14EE4:
+	cmp.b	#';',d0
+	beq.b	.C14F4C
+	cmp.b	#'H',d0			; ->
+	beq.b	.C14F32
+	cmp.b	#'K',d0
+	beq.b	.C14F72
+	cmp.b	#'D',d0			; <-
+	beq.b	.pijl_terug_CL
+	cmp.b	#'m',d0			; inverse
+	beq.b	.C14F0E
 	br	nog_niet_scrollen
 
-C14F06:
-	dbra	d3,C14EC0
+.C14F06:
+	dbra	d3,.C14EC0
 	br	CL_cursorstuff
 
-C14F0E:
+.C14F0E:
 	bchg	#SB2_REVERSEMODE,(SomeBits2-DT,a4)	;toggle inverse font
 	bsr	get_font
 	br	nog_niet_scrollen
 
-pijl_terug_CL:
+.pijl_terug_CL:
 	sub	d1,d6
-C14F1E:
+.C14F1E:
 	tst	d6
-	bpl.w	alleen_CL_movecurs	;niet begin regel
-	add.w	(Scr_br_chars-DT,a4),d6	;!3
-	subq.w	#2,d7			;niet begin y
-	bpl.b	C14F1E
+	bpl.w	alleen_CL_movecurs	; not begin line
+	add.w	(Scr_br_chars-DT,a4),d6
+	subq.w	#2,d7			; not begin y
+	bpl.b	.C14F1E
 	moveq	#0,d7
 	br	alleen_CL_movecurs
 
-C14F32:
+.C14F32:
 	subq.w	#1,d1
-	bpl.b	C14F3A
+	bpl.b	.C14F3A
 	br	nog_niet_scrollen
 
-C14F3A:
+.C14F3A:
 	cmp	(Scr_br_chars-DT,a4),d1
-	bcs.b	C14F46
+	bcs.b	.C14F46
 	move	(Scr_br_chars-DT,a4),d1
 	subq.w	#1,d1
-C14F46:
+.C14F46:
 	move	d1,d6
 	br	alleen_CL_movecurs
 
-C14F4C:
+.C14F4C:
 	subq.w	#1,d1
-	bpl.b	C14F52
-	bra.b	C14F06
+	bpl.b	.C14F52
+	bra.b	.C14F06
 
-C14F52:
+.C14F52:
 	cmp	(aantal_regels_min2-DT,a4),d1
-	bcs.b	C14F60
+	bcs.b	.C14F60
 	move	(aantal_regels_min3-DT,a4),d1
 	bsr	scroll_up_cmdmode
-C14F60:
+.C14F60:
 	lsl.w	#1,d1		;!!! there is an enforcer hit somewhere around here..
 	move	d1,d7
 	move.l	a6,a1
@@ -35873,13 +35736,12 @@ C14F60:
 	add	d7,d7
 	add.l	(a5,d7.w),a1
 	move	(sp)+,d7
-	bra.b	C14F06
+	bra.b	.C14F06
 
-C14F72:
+.C14F72:
 	btst	#SB2_REVERSEMODE,(SomeBits2-DT,a4)	;is inverse?
 	beq.b	clear_2_eol
 	move	d6,(Cursor_col_pos-DT,a4)
-;	bsr	clear_menu_balk
 	br	alleen_CL_movecurs
 
 clear_2_eol:
@@ -35895,9 +35757,9 @@ clear_2_eol:
 	mulu.w  (EFontSize_y-DT,a4),d1
 
 	add.w	(Scr_Title_sizeTxt-DT,a4),d1	;!2
-	jsr	(_LVOMove,a6)	; ***
+	jsr	(_LVOMove,a6)
 
-	jsr	(_LVOClearEOL,a6)		; ***
+	jsr	(_LVOClearEOL,a6)
 	movem.l	(sp)+,d0-a6
 
 	br	alleen_CL_movecurs
@@ -35906,8 +35768,7 @@ clear_2_eol:
 
 Place_cursor_blokje:
 	move	(cursor_row_pos-DT,a4),d7	; *** y
-	bne.b	.algoed				; ***
-	jsr	(C1382).l
+	bne.w	.algoed
 .algoed:
 	movem.l	d0-a6,-(sp)
 
@@ -35915,9 +35776,9 @@ Place_cursor_blokje:
 	move.l	(Rastport-DT,a4),a1
 
 	moveq.l	#3,d0
-	jsr	(_LVOSetAPen,a6)	; ***
+	jsr	(_LVOSetAPen,a6)
 	moveq.l	#2,d0			; inverse
-	jsr	(_LVOSetDrMd,a6)	; ***
+	jsr	(_LVOSetDrMd,a6)
 
 	move.w	(Cursor_col_pos-DT,a4),d0	; x
 	mulu.w	(EFontSize_x-DT,a4),d0
@@ -35928,21 +35789,21 @@ Place_cursor_blokje:
 
 	add.w	(Scr_Title_size-DT,a4),d1
 
-	movem.w	d0/d1,-(sp)		; ***
+	movem.w	d0/d1,-(sp)
 	move.w	boldx(pc),d0
 	move.w	boldy(pc),d1
 	bmi.b	.ok			; *** Reset caret
 	cmp.w	(sp),d1			; *** Old values are differents ?
-	bne.b	.print			; ***
+	bne.b	.print
 	cmp.w	2(sp),d0
-	bne.b	.print			; ***
-	movem.w	(sp)+,d0/d1		; ***
+	bne.b	.print
+	movem.w	(sp)+,d0/d1
 	bra.b	.klaarhoor		; *** Same position: leave it as is
 .print
 	bsr.b	.blokje			; *** Clear it at old position
 	move.l	(Rastport-DT,a4),a1
 .ok:
-	movem.w	(sp)+,d0/d1		; ***
+	movem.w	(sp)+,d0/d1
 	move.w	d0,boldx		; *** Save old values
 	move.w	d1,boldy
 	bsr	.blokje			; *** Display it at new position
@@ -35951,11 +35812,11 @@ Place_cursor_blokje:
 	move.l	(Rastport-DT,a4),a1
 
 	moveq.l	#1,d0
-	jsr	(_LVOSetAPen,a6)	; ***
+	jsr	(_LVOSetAPen,a6)
 	moveq.l	#0,d0
-	jsr	(_LVOSetBPen,a6)	; ***
+	jsr	(_LVOSetBPen,a6)
 	moveq.l	#1,d0			;jam2
-	jsr	(_LVOSetDrMd,a6)	; ***
+	jsr	(_LVOSetDrMd,a6)
 
 	movem.l	(sp)+,d0-a6
 	rts
@@ -36158,7 +36019,6 @@ ScrollEditorUpHard:
 	rts
 
 ;Scrollcpu040up:
-;	jsr	test_debug
 ;.lopje:
 ;	rept	5
 ;	move16	(a5)+,(a6)+
@@ -36333,25 +36193,25 @@ vulin_infobar:
 ; A0 = LENGTH TEXT [ LOCATION TEXT ]
 
 Writefile_afwerken:
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(FileLength-DT,a4),d0
 	bsr	PI_druklinenr
 	lea	(ascii.MSG87,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(FileLength-DT,a4),d0
-	bsr	druk_af_d0
-	bsr	druk_af_space
+	bsr	Print_D0
+	bsr	Print_Space
 	moveq	#')',d0
-	bsr	SENDONECHARNORMAL
-	bsr	druk_cr_nl
+	bsr	Print_Char
+	bsr	Print_NewLine
 	moveq	#0,d0
-	br	SENDONECHARNORMAL
+	br	Print_Char
 
 ;****************************
 ;*    PRINT SYMBOL TABLE    *
 ;****************************
 
-com_PRINT_SYMBOLTABEL:
+com_PrintSymbolTable:
 	move.b	#$FF,(B30048-DT,a4)
 	clr	(PageNumber-DT,a4)
 	move	(aantal_regels_min2-DT,a4),(PageHeight-DT,a4)
@@ -36369,7 +36229,7 @@ PRINT_SYMBOLTABELMAYBE:
 	cmp.b	#$7F,-(a0)
 	bne	.end
 
-	bsr	PRINT_PAGED
+	bsr	Print_Paged
 	move.l	(LabelStart-DT,a4),a2
 	moveq	#1,d4
 	cmp.b	#$FF,(B30048-DT,a4)
@@ -36438,7 +36298,7 @@ PRINT_SYMBOLTABELMAYBE:
 	add	(Label1Entry-DT,a4),d0
 	cmp.b	d0,d5
 	bne.b	.loop2
-	br	druk_cr_nl
+	br	Print_NewLine
 
 .printTree:
 	move.l	a3,-(sp)
@@ -36456,14 +36316,14 @@ PRINT_SYMBOLTABELMAYBE:
 .end:
 ;C1544C:
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL		;druk regel en leeg buffer
+	bsr	Print_Char		;druk regel en leeg buffer
 	rts
 
 .PRINTONENAME:
 	bchg	#0,d4
 	beq.b	.C1545C
-	bsr	druk_cr_nl
-	bsr	PRINT_PAGED
+	bsr	Print_NewLine
+	bsr	Print_Paged
 .C1545C:
 	move.b	d5,d0
 	bsr	.SPECIAL_PRINT
@@ -36499,7 +36359,7 @@ PRINT_SYMBOLTABELMAYBE:
 	addq.w	#1,d1
 .puntlopje:
 	moveq	#'.',d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,.puntlopje
 
 	addq.w	#1,a0
@@ -36512,14 +36372,14 @@ PRINT_SYMBOLTABELMAYBE:
 	move	(a0)+,d0
 	bsr	C15908
 	moveq	#'.',d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	(a0)+,d0
-	bsr	druk_af_d0
+	bsr	Print_D0
 .C154CA:
 	btst	#0,d4
 	bne	.end
 	moveq	#' ',d0
-	br	SENDONECHARNORMAL
+	br	Print_Char
 
 .ItsAMacro:
 	lsr.w	#7,d0
@@ -36531,7 +36391,7 @@ PRINT_SYMBOLTABELMAYBE:
 	add	d0,a0
 	add	(a0),a0
 	
-	bsr	printthetext
+	bsr	Print_Text
 	bra.b	.C154CA
 
 .symboltabje:
@@ -36557,7 +36417,7 @@ PRINT_SYMBOLTABELMAYBE:
 .NEXT1:
 	moveq	#'.',d0
 .NEXT0:
-	br	SENDONECHARNORMAL
+	br	Print_Char
 
 
 ;*   Print assembling now   *
@@ -36565,14 +36425,14 @@ PRINT_SYMBOLTABELMAYBE:
 PRINT_ASSEMBLING_NOW:
 	bsr.b	PRINT_ASSEMBLING
 	moveq	#0,d0
-	br	SENDONECHARNORMAL
+	br	Print_Char
 
 ;*   Print assembling   *
 
 PRINT_ASSEMBLING:
-	bsr	PRINT_PAGED
+	bsr	Print_Paged
 	move.l	(DATA_CURRENTLINE-DT,a4),d0
-	bsr	DrukAf_LineNrPrint
+	bsr	Print_LineNumber
 	move	(ResponseType-DT,a4),d2
 	bpl.b	C1557C
 	lsr.w	#8,d2
@@ -36589,17 +36449,17 @@ C1554C:
 C15550:
 	moveq	#11,d1
 C15552:
-	bsr	druk_af_space
+	bsr	Print_Space
 	dbra	d1,C15552
 	moveq	#$3D,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move	(ResponseType-DT,a4),d0
 	bsr	C15908
 	moveq	#$2E,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	(ResponsePtr-DT,a4),a0
 	move.l	a0,d0
-	bsr	druk_af_d0
+	bsr	Print_D0
 	moveq	#4,d5
 	bra.b	C155C2
 
@@ -36610,9 +36470,9 @@ C1557C:
 	move	(ResponseType-DT,a4),d0
 	bsr	C15908
 	moveq	#$2E,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	a0,d0
-	bsr	Druk_af_D0
+	bsr	Print_D0AndSpace
 	tst	d7	;passone
 	bmi.b	C155EE
 	move.l	(INSTRUCTION_ORG_PTR-DT,a4),d4
@@ -36634,7 +36494,7 @@ C155B8:
 C155C2:
 	lsl.w	#1,d5
 C155C4:
-	bsr	druk_af_space
+	bsr	Print_Space
 	dbra	d5,C155C4
 C155CC:
 	move.l	(DATA_LINE_START_PTR-DT,a4),a0
@@ -36646,7 +36506,7 @@ C155DA:
 	beq.b	C15614
 	cmp.b	#9,d0
 	beq.b	C155FC
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C155DA
 	bra.b	C15614
 
@@ -36654,12 +36514,12 @@ C155EE:
 	moveq	#$14,d2
 C155F0:
 	moveq	#$20,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d2,C155F0
 	bra.b	C155CC
 
 C155FC:
-	bsr	druk_af_space
+	bsr	Print_Space
 	dbra	d1,C15606
 	bra.b	C15614
 
@@ -36672,24 +36532,25 @@ C15606:
 	bra.b	C155DA
 
 C15614:
-	br	druk_cr_nl
+	br	Print_NewLine
 
-PRINT_PAGED:
+Print_Paged:
 	btst	#$1D,d7
-	beq.b	C15682
+	beq.b	.end
 	btst	#0,(PR_Paging).l
-	beq.b	C15682
+	beq.b	.end
 	subq.w	#1,(PageLinesLeft-DT,a4)
-	bpl.b	C15682
+	bpl.b	.end
+
 	move.l	a0,-(sp)
 	tst	(PageNumber-DT,a4)
-	beq.b	C15644
+	beq.b	.skip
 	btst	#0,(PR_HaltPage).l
-	beq.b	C15644
+	beq.b	.skip
 	bsr	Get_me_a_char
-C15644:
-	lea	(Page.MSG,pc),a0
-	bsr	printthetext
+
+.skip:	lea	(Page.MSG,pc),a0
+	bsr	Print_Text
 	addq.w	#1,(PageNumber).l
 	move	(PageHeight-DT,a4),d0
 	subq.w	#2,d0
@@ -36697,54 +36558,53 @@ C15644:
 	move	(PageNumber-DT,a4),d0
 	bsr	C1596C
 	tst.b	(TITLE_STRING-DT,a4)
-	beq.b	C15676
+	beq.b	.done
 	lea	(Of.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	lea	(TITLE_STRING-DT,a4),a0
-	bsr	printthetext
-C15676:
-	bsr	druk_cr_nl
-	bsr	druk_cr_nl
+	bsr	Print_Text
+
+.done:	bsr	Print_NewLine
+	bsr	Print_NewLine
 	move.l	(sp)+,a0
 	rts
 
-C15682:
-	rts
+.end:	rts
 
-PRINTINCLUDENAME:
+Print_IncludeName:
 	movem.l	d0-d7/a0-a6,-(sp)
-	bsr	printthetext		;Incbin  : "
+	bsr	Print_Text		; Incbin  : "
 	move.l	a0,-(sp)
 	lea	(CurrentAsmLine-DT,a4),a0
 	movem.l	d1/a6,-(sp)
 	move.l	a0,a6
 	moveq	#0,d1
-C1569A:
-	tst.b	(a6)
-	beq.b	DA_EndFilename	;klaar
+
+.loop:	tst.b	(a6)
+	beq.b	DA_EndFilename		; done
 	cmp.b	#':',(a6)
-	beq.b	C156A8
-C156A4:
-	addq.l	#1,a6
-	bra.b	C1569A
-C156A8:
-	addq.w	#1,d1
-	bra.b	C156A4
+	beq.b	.col
+
+.next:	addq.l	#1,a6
+	bra.b	.loop
+
+.col:	addq.w	#1,d1
+	bra.b	.next
 
 
 DA_EndFilename:
 	cmp	#1,d1
-	bgt.b	C156B8
+	bgt.b	.C156B8
 	tst	(W2DF84-DT,a4)
-	beq.b	C156BC
-C156B8:
+	beq.b	.C156BC
+.C156B8:
 	lea	(SourceCode-DT,a4),a0
-C156BC:
+.C156BC:
 	bsr	strcount
 	movem.l	(sp)+,d1/a6
-	bsr	PrintMsgText	; dh1:TRASH_os/pics/asm-pro48x74.iff
+	bsr	Print_MsgText	; dh1:TRASH_os/pics/asm-pro48x74.iff
 	move.l	(sp)+,a0
-	bsr	printthetext
+	bsr	Print_Text
 	movem.l	(sp)+,d0-d7/a0-a6
 	rts
 
@@ -36752,111 +36612,138 @@ strcount:
 	move.l	a0,a6
 	move.w	(Scr_br_chars-DT,a4),d1
 	sub.w	#27-2+13,d1
-.lopje
-	tst.b	(a6)+
-	beq.s	.klaar
+
+.loop:	tst.b	(a6)+
+	beq.s	.done
 	subq.l	#1,d1
-	bra.b	.lopje
-.klaar
-	tst.w	d1
-	bpl.s	.nothin
+	bra.b	.loop
+
+.done:	tst.w	d1
+	bpl.s	.end
 	neg.w	d1
 	lea	(a0,d1.w),a0
-.nothin:
-	rts
 
-drukke2:
-	bsr	SENDONECHARNORMAL
-printthetext:
+.end:	rts
+
+Print_Text:
 	move.b	(a0)+,d0
-	bne.b	drukke2
+	beq.s	.end
+	bsr	Print_Char
+	bra.s	Print_Text
+.end:	rts
+
+
+Print_Text_Centered:			; a0 = the text
+	movem.l	d0-a6,-(sp)
+	move.l	a0,a1			; save
+
+	moveq.l	#0,d0
+.len:	tst.b	(a0)+
+	beq.s	.done
+	addq.l	#1,d0
+	bra.s	.len
+
+.done:	tst.l	d0			; d0 = strlen
+	beq.s	.end			; empty string
+
+	moveq.l	#0,d1
+	move.w	(Scr_br_chars-DT,a4),d1	; d1 = # chars in screen width
+	beq.s	.print			; if this is 0 for whatever reason
+
+	lsr.l	#1,d1			; divide by 2
+	lsr.l	#1,d0
+
+	sub.w	d0,d1			; number of padding chars
+.loop:	moveq.l	#$20,d0
+	jsr	Print_Char
+	dbf	d1,.loop
+
+.print:	move.l	a1,a0
+	bsr.w	Print_Text
+
+.end:	movem.l	(sp)+,d0-a6
 	rts
 
-drukke:
-	bsr	SENDONECHARNORMAL
-PrintMsgText:
+
+;drukke2:
+;	bsr	Print_Char
+;Print_Text:
+;	move.b	(a0)+,d0
+;	bne.b	drukke2
+;	rts
+
+;drukke:
+;	bsr	Print_Char
+Print_MsgText:
 	move.l	(text_buf_ptr-DT,a4),d0
 	sub.l	#TextPrintBuffer,d0
 
 	move.w	(Scr_br_chars-DT,a4),d1
 	sub.w	#27-2,d1
 	cmp.w	d1,d0
-	bhi.s	.klaar
+	bhi.s	.end
 
 	move.b	(a0)+,d0
-	bne.b	drukke
+	;;bne.b	drukke
+	beq.s	.done
+	bsr	Print_Char
+	bra.s	Print_MsgText
 
-	move.l	(text_buf_ptr-DT,a4),d0
+.done:	move.l	(text_buf_ptr-DT,a4),d0
 	sub.l	#TextPrintBuffer,d0
 
 	move.w	(Scr_br_chars-DT,a4),d7
 	sub.w	#27-2,d7
 	sub.w	d0,d7
-;	bra.b	.jumpin
-.lopje:
-	bsr	druk_af_space
-;.jumpin:
-	dbf	d7,.lopje
-.klaar:
-	rts
 
+.loop:	bsr	Print_Space
+	dbf	d7,.loop
 
-C156DA:
-	bsr	SENDONECHARNORMAL
-	moveq	#0,d0
-	sub.b	(a0)+,d0
-	bne.b	C156DA
-	br	SENDONECHARNORMAL
+.end:	rts
+
 
 C156E8:
 	clr	d0
-	bsr	SENDONECHARNORMAL
-C156EE:
-	move.b	(a0)+,d0
+	bsr	Print_Char
+
+.loop:	move.b	(a0)+,d0
 	bsr.b	cmd_put_char_in_buffer
 	tst.b	d0
-	bne.b	C156EE
+	bne.b	.loop
 	rts
 
-C156F8:
-	bsr	Druk_char_af2
 druk_status_en_end_af:
-	move.b	(a0)+,d0
-	bne.b	C156F8
-	rts
+.loop:	move.b	(a0)+,d0
+	beq.b	.exit
+	bsr	Druk_char_af2
+	bra.s	.loop
+.exit:	rts
 
 beeldtextaf:
-	bsr.b	printthetext
-	bra.w	SENDONECHARNORMAL
+	bsr.w	Print_Text
+	bra.w	Print_Char
 
 
 update_status_bar:
 	bsr.b	druk_status_en_end_af
-	bra.w	SENDONECHARNORMAL
+	bra.w	Print_Char
 
-C1570A:
-	bsr	SENDONECHARNORMAL
-	move.b	(a0)+,d0
-	bpl.b	C1570A
-	and	#$007F,d0
-	bra.b	SENDONECHARNORMAL
-
-druk_cr_nl:
+Print_NewLine:
 	move	d0,-(sp)
-	move.b	#13,d0
-	bsr.b	SENDONECHARNORMAL
-	move.b	#10,d0
-	bsr.b	SENDONECHARNORMAL
+	move.b	#13,d0			; CR
+	bsr.b	Print_Char
+	move.b	#10,d0			; LF
+	bsr.b	Print_Char
 	move	(sp)+,d0
 	rts
 
-Druk_af_eol:
+Print_EOL:
 	move.b	#10,d0
-	bra.b	SENDONECHARNORMAL
+	bra.b	Print_Char
 
-Druk_Clearbuffer:
+Print_ClearBuffer:
 	move.b	#0,d0
-	bra.b	SENDONECHARNORMAL
+	bra.b	Print_Char
 
 cmd_put_char_in_buffer:
 	move.l	a0,-(sp)
@@ -36874,29 +36761,22 @@ cmd_put_char_in_buffer:
 	beq	C15854
 	move.l	d2,(text_buf_ptr-DT,a4)	;reset ptr
 	btst	#0,(PR_PrintDump).l
-	beq.b	C15768
-	bsr	druk_af_op_printer
-C15768:
-	movem.l	(sp)+,d0-d3
+	beq.b	.end
+	bsr	Print_ToPrinter
+
+.end:	movem.l	(sp)+,d0-d3
 	move.l	(sp)+,a0
 	rts
 
-druk_eol:
-	movem.l	d0-a6,-(sp)
-	bclr	#SB1_CHANGE_MODE,(SomeBits-DT,a4)
-	moveq.l	#0,d0
-	bsr.s	SENDONECHARNORMAL
-	movem.l	(sp)+,d0-a6
-	rts
-	
-druk_af_space:
+Print_Space:
 	move.b	#" ",d0
-SENDONECHARNORMAL:
-	tst.b	(SomeBits-DT,a4)	;speciaal?
-	bpl.b	Stop_Char_in_buffer	;neuj
+
+Print_Char:
+	tst.b	(SomeBits-DT,a4)	; speciaal?
+	bpl.b	Stop_Char_in_buffer	; neuj
 	bclr	#SB1_CHANGE_MODE,(SomeBits-DT,a4)
 	pea	(Stop_Char_in_buffer,pc)
-	move.l	a0,-(sp)			;string ptr
+	move.l	a0,-(sp)		; string ptr
 	move.l	(text_buf_ptr-DT,a4),a0
 	br	C15820
 
@@ -36904,7 +36784,7 @@ Stop_Char_in_buffer:
 	move.l	a0,-(sp)
 	move.l	(text_buf_ptr-DT,a4),a0
 	tst.b	d0
-	beq.b	druk_the_string			;einde regel afdrukken dus
+	beq.b	druk_the_string		; einde regel afdrukken dus
 	move.b	d0,(a0)+
 	cmp.l	#text_buf_ptr,a0
 	blo	C15858
@@ -36912,27 +36792,27 @@ druk_the_string:
 	movem.l	d0-d3,-(sp)
 	move.l	a0,d3
 	move.l	#TextPrintBuffer,d2
-	sub.l	d2,d3			;strlen
+	sub.l	d2,d3			; strlen
 	beq	C15854
 
-	move.l	d2,(text_buf_ptr-DT,a4)	;reset text_buf_ptr
+	move.l	d2,(text_buf_ptr-DT,a4)	; reset text_buf_ptr
 	btst	#SB2_INSERTINSOURCE,(SomeBits2-DT,a4)
 	beq.b	.text_printer_dump
 	jsr	(InsertText).l
-	bra.b	C157EC
+	bra.b	.C157EC
 
 .text_printer_dump:
 	btst	#0,(PR_PrintDump).l
 	beq.b	.C157D8
-	bsr	druk_af_op_printer
+	bsr	Print_ToPrinter
 .C157D8:
 	btst	#SB2_OUTPUTACTIVE,(SomeBits2-DT,a4)	;output2screen2
 	beq.b	.C157E4
 	bsr	C17ADE
 .C157E4:
-	bsr	Druk_regel_in_commandshell
-	bsr	messages_get
-C157EC:
+	bsr	CS_PrintLine
+	bsr	IO_GetKeyMessages
+.C157EC:
 	movem.l	(sp)+,d0-d3
 	move.l	(sp)+,a0
 	rts
@@ -36971,12 +36851,12 @@ C15820:
 ;	btst	#MB1_DRUK_IN_MENUBALK,(MyBits-DT,a4)
 ;	beq.s	.gewoon
 ;	
-;;	bsr	show_txt_in_balk2
+;;	bsr	Print_TextInMenubar2
 ;	bra.b	.inbalk
 ;.gewoon:
-	bsr	Druk_regel_in_commandshell
+	bsr	CS_PrintLine
 ;.inbalk
-	bsr	messages_get
+	bsr	IO_GetKeyMessages
 C1584C:
 	movem.l	(sp)+,d0-d3
 	move.l	(sp)+,a0	;txt pointer terug.
@@ -36989,40 +36869,34 @@ C15858:
 	move.l	(sp)+,a0
 	rts
 
-druk_af_op_printer:
+Print_ToPrinter:
 	movem.l	d0-d6/a0-a3/a5/a6,-(sp)
 	move.l	(PrinterBase-DT,a4),d1
-	bne.b	C15876
-	jsr	(OpenPrinterForOutput).l			;open file
-	move.l	(PrinterBase-DT,a4),d1	;file
-	beq.b	C15882
-C15876:
-	move.l	(DosBase-DT,a4),a6
+	bne.b	.print
+	jsr	(OpenPrinterForOutput).l	; open file
+	move.l	(PrinterBase-DT,a4),d1		; file
+	beq.b	.end
+
+.print:	move.l	(DosBase-DT,a4),a6
 	jsr	(_LVOWrite,a6)
-	bsr	messages_get
-C15882:
-	movem.l	(sp)+,d0-d6/a0-a3/a5/a6
+	bsr	IO_GetKeyMessages
+
+.end:	movem.l	(sp)+,d0-d6/a0-a3/a5/a6
 	rts
 
-SENDCHARDELSCR:
+Print_DelScr:
 	moveq	#12,d0
 	br	Druk_char_af2
 
-C1588E:
-	move.b	#$9B,d0
-	bsr	Druk_char_af2
-	moveq	#$4B,d0
-	br	Druk_char_af2
-
-PRINT_CLEARSCREEN:
+Print_ClearScreen:
 	move.b	#$9B,d0
 	bsr	Druk_char_af2
 	moveq	#$48,d0
 	br	Druk_char_af2
 
-Druk_af_D0:
-	bsr.b	druk_af_d0
-	br	druk_af_space
+Print_D0AndSpace:
+	bsr.b	Print_D0
+	br	Print_Space
 
 
 C158CA:
@@ -37032,9 +36906,9 @@ C158CA:
 	cmp.l	(INSERT_END-DT,a4),d0
 	bhi.b	C158EE
 	lea	(LB_.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(sp)+,d0
-	bra.b	druk_af_d0			; draw 32 bits
+	bra.b	Print_D0			; draw 32 bits
 
 C158E4:
 	move.l	d0,-(sp)
@@ -37042,10 +36916,10 @@ C158E4:
 	bne.b	C158CA
 C158EE:
 	moveq	#$24,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	(sp)+,d0
 	sub.l	(INSERT_START-DT,a4),d0
-druk_af_d0:
+Print_D0:
 	swap	d0
 	bsr.b	C15900
 	swap	d0
@@ -37063,20 +36937,20 @@ C15910:
 	and.b	#15,d0
 	add.b	#$30,d0
 	cmp.b	#$39,d0
-	ble.w	SENDONECHARNORMAL
+	ble.w	Print_Char
 	addq.b	#7,d0
-	br	SENDONECHARNORMAL
+	br	Print_Char
 
-DrukAf_LineNrPrint:
+Print_LineNumber:
 	bsr.b	C1596C
-	br	druk_af_space
+	br	Print_Space
 
 Druk_D0_inCommandline:
 	tst.l	d0
 	bpl.b	PI_druklinenr
 	move.l	d0,-(sp)
 	moveq	#$2D,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	(sp)+,d0
 	neg.l	d0
 	moveq	#0,d3
@@ -37094,47 +36968,44 @@ C1597C:
 	lea	(TABEL_HEXTODEC,pc),a0
 C15980:
 	move.l	d0,d2
-C15982:
+.C15982:
 	move.l	(a0)+,d1
-	beq.b	C159B4
+	beq.b	.C159B4
 	cmp.l	d1,d2
-	bcs.b	C15994
+	bcs.b	.C15994
 	moveq	#$30,d3
-C1598C:
+.C1598C:
 	sub.l	d1,d2
 	addq.b	#1,d3
 	cmp.l	d1,d2
-	bcc.b	C1598C
-C15994:
+	bcc.b	.C1598C
+.C15994:
 	tst.b	d3
-	beq.b	C15982
+	beq.b	.C15982
 	move.b	d3,d0
 	tst.b	(B3004E-DT,a4)
-	beq.b	C159AA
+	beq.b	.C159AA
 	cmp.b	#$20,d0
-	beq.b	C159AE
+	beq.b	.C159AE
 	move.b	d0,(a3)+
-	bra.b	C159AE
+	bra.b	.C159AE
 
-C159AA:
-	bsr	SENDONECHARNORMAL
-C159AE:
+.C159AA:
+	bsr	Print_Char
+.C159AE:
 	and.b	#$F0,d3
-	bra.b	C15982
+	bra.b	.C15982
 
-C159B4:
+.C159B4:
 	move.l	d2,d0
 	add.b	#$30,d0
 	tst.b	(B3004E-DT,a4)
-	beq.b	C159CA
-	cmp.b	#$20,d0
-	beq.b	C159C8
+	beq.b	.send
+	cmp.b	#$20,d0			; SPC
+	beq.b	.end
 	move.b	d0,(a3)+
-C159C8:
-	rts
-
-C159CA:
-	br	SENDONECHARNORMAL
+.end:	rts
+.send:	br	Print_Char
 
 TABEL_HEXTODEC:
 	dc.l	1000000000
@@ -37383,9 +37254,9 @@ B15D4F:
 B15D50:
 	dc.b	0
 NotANumber.MSG:
-	dc.b	'- Not a Number -',0		; ***
+	dc.b	'- Not a Number -',0
 Erroropeningr.MSG:
-	dc.b	'Error opening requested screenmode. Switching back ' ; ***
+	dc.b	'Error opening requested screenmode. Switching back '
 	dc.b	'to PAL 640*256',0
 HChangedstand.MSG:
 	dc.b	$9B
@@ -37412,10 +37283,10 @@ SourceNrInBalk:
 	dc.b	'0 »'
 MenuFileName:	dcb.b	31,0
 
-HInclude.MSG:	dc.b	$9B,'1H','Include : "',0,'"',0
-HIncbin.MSG:	dc.b	$9B,'1H','Incbin  : "',0,'"',0
-HInciff.MSG:	dc.b	$9B,'1H','Inciff  : "',0,'"',0
-HInclink.MSG:	dc.b	$9B,'1H','Inclink : "',0,'"',0
+HInclude.MSG:	dc.b	$9B,'1H','Include:  "',0,'"',0
+HIncbin.MSG:	dc.b	$9B,'1H','Incbin:   "',0,'"',0
+HInciff.MSG:	dc.b	$9B,'1H','Inciff:   "',0,'"',0
+HInclink.MSG:	dc.b	$9B,'1H','Inclink:  "',0,'"',0
 
 H.MSG:			dc.b	$9B
 			dc.b	'52H =',0
@@ -37458,8 +37329,8 @@ Couldntopenma.MSG:	dc.b	'Couldn''t open mathffp.library',$A,0
 Couldntopenma.MSG0:	dc.b	'Couldn''t open mathtrans.library',$A,0
 MathffpName:		dc.b	'mathffp.library',0
 MathtransName:		dc.b	'mathtrans.library',0
-Sourcenotsave.MSG:	dc.b	'Source not saved ! Continue ?',0
-Filealreadyex.MSG:	dc.b	'File already exists ! Continue ?',0
+Sourcenotsave.MSG:	dc.b	'Source not saved!! Continue??',0
+Filealreadyex.MSG:	dc.b	'File already exists!! Continue??',0
 ExitorRestart.MSG:	dc.b	'Exit or Restart (Y/N or R)?',0
 			dc.b	' ON',0
 			dc.b	'OFF',0
@@ -37467,11 +37338,11 @@ ExitorRestart.MSG:	dc.b	'Exit or Restart (Y/N or R)?',0
 EOP.MSG:		dc.b	'EOP     ',0
 Removeunusedl.MSG:	dc.b	'Remove unused labels (Y/N) ?',0
 Updating.MSG:		dc.b	'Updating .. ',0
-Sourcenotchan.MSG:	dc.b	'Source not changed. No update needed !',$A,0
+Sourcenotchan.MSG:	dc.b	'Source not changed. No update needed!!!',$A,0
 Sortingreloar.MSG:	dc.b	'Sorting relo-area..',$A,0
 Writinghunkda.MSG:	dc.b	'Writing hunk data..',$A,0
 Writinghunkle.MSG:	dc.b	'Writing hunk length..',$A,0
-			dc.b	'Memory overflow !',0
+			dc.b	'Memory overflow!!!',0
 			dc.b	'NL ',0
 			dc.b	'-- ',0
 			dc.b	'L7 ',0
@@ -37479,16 +37350,16 @@ Writinghunkle.MSG:	dc.b	'Writing hunk length..',$A,0
 			dc.b	'RS',0
 			dc.b	'--',0
 			dc.b	'Mode : ',0
-Reqtoolslibra.MSG0:	dc.b	'Reqtools.library not found !',$A,0
-Reqtoolslibra.MSG:	dc.b	'Reqtools.library disabled due to no free chip mem !',$A,0
-Notenoughwork.MSG:	dc.b	'Not enough workmem for source !',$A,0
+Reqtoolslibra.MSG0:	dc.b	'Reqtools.library not found!!!',$A,0
+Reqtoolslibra.MSG:	dc.b	'Reqtools.library disabled due to no free chip mem!!!',$A,0
+Notenoughwork.MSG:	dc.b	'Not enough workmem for source!!!',$A,0
 Break.MSG:		dc.b	10,'** Break    ',$A,0
 HPass1.MSG:		dc.b	$9B,'1HPass 1..      ',$A,0
 HPass2.MSG:		dc.b	$9B,'1HPass 2..      ',$A,0
 Page.MSG:		dc.b	'Page',0
 Of.MSG:			dc.b	'  Of ',0
 HNoErrors.MSG:		dc.b	$9B,'1HNo errors     ',$A,0
-HErrorsOccure.MSG:	dc.b	$9B,'1HErrors occured !',$A,0
+HErrorsOccure.MSG:	dc.b	$9B,'1HErrors occured!!!',$A,0
 HSourcechecke.MSG:	dc.b	$9B,'1HSource checked',$A,0
 Zap.MSG:		dc.b	'<Zap> ',0
 HReAssembling.MSG:	dc.b	$9B,'1HReAssembling.. ',$A,0
@@ -37650,8 +37521,9 @@ EndPos2:
 EndPos3:
 	dc.b	'0;1H'
 	dc.b	0
-END.MSG:
+EOF.MSG:
 	dc.b	'<END>',0
+	;dc.b	'^D',0
 
 DCB.MSG:
 	dc.b	9,'DC.B',9,0
@@ -37688,9 +37560,9 @@ Conditionbrea.MSG:
 	dc.b	' Condition breakpoint reached',0
 	dc.b	' Mode NOT allowed in conditional breakpoint ',0
 Addressnotfou.MSG:
-	dc.b	' Address not found !!',0
+	dc.b	' Address not found!!!!!!!!!!',0
 Endofprogramr.MSG:
-	dc.b	' End of program reached !!',0
+	dc.b	' End of program reached!!!!!!',0
 WatchtypeAsci.MSG:
 	dc.b	' Watch type (A)scii (S)tring (H)ex (D)ecimal (B)inar'
 	dc.b	'y (P)ointer: ',0
@@ -37707,7 +37579,7 @@ ReplaceYNLG.MSG:
 Jumping.MSG:
 	dc.b	' Jumping.. ',0
 BufferFull.MSG:
-	dc.b	' Buffer full !',0
+	dc.b	' Buffer full!!!!!!!',0
 Done.MSG:
 	dc.b	'Done',0
 UncommentDone.MSG:
@@ -37727,7 +37599,7 @@ Createmacro.MSG:
 Marklocationa.MSG:
 	dc.b	' Mark location and press <return>',0
 Macrobufferfu.MSG:
-	dc.b	' Macro buffer full !!',0
+	dc.b	' Macro buffer full!!!!!!!!',0
 	dc.b	'EXTERN'
 	dc.b	$80
 MAINDATA:
@@ -37808,7 +37680,7 @@ C16EC4:
 	move.l	(4).w,a6
 	jmp	(_LVOFreeMem,a6)
 
-C16EDA:
+CalcCheck:
 	bsr.b	C16F26
 	bsr.b	AllocMem1Kb
 	move.l	d0,(TRACK_BUFFER-DT,a4)
@@ -37920,14 +37792,14 @@ Com_ReadSector:
 	bsr	C17114
 	br	C17186
 
-C17048:
+com_WriteSector:
 	bsr	C16F26
 	move	#3,(TRACK_COMMAND-DT,a4)
 	bsr.b	C170CA
 	bsr	C17114
 	br	C17186
 
-C1705C:
+com_WriteTrack:
 	bsr	C16F26
 	move	#3,(TRACK_COMMAND-DT,a4)
 	bsr.b	C170CA
@@ -38011,7 +37883,7 @@ C17134:
 	cmp	#3,(TRACK_COMMAND-DT,a4)
 	bne.b	C17152
 	move	#15,($001C,a1)
-	jsr	(_LVODoIO,a6)			; ***
+	jsr	(_LVODoIO,a6)
 	tst.l	($0020,a1)
 	beq.b	C17152
 	jmp	(ERROR_WriteProtected).l
@@ -38021,23 +37893,23 @@ C17152:
 	move.l	(TRACK_LENGTH-DT,a4),($0024,a1)
 	move.l	(TRACK_BUFFER-DT,a4),($0028,a1)
 	move.l	(TRACK_POINTER-DT,a4),($002C,a1)
-	jsr	(_LVODoIO,a6)			; ***
+	jsr	(_LVODoIO,a6)
 	move	#4,($001C,a1)
-	jsr	(_LVODoIO,a6)			; ***
+	jsr	(_LVODoIO,a6)
 	move	#9,($001C,a1)
 	clr.l	($0024,a1)
-	jmp	(_LVODoIO,a6)			; ***
+	jmp	(_LVODoIO,a6)
 
 C17186:
 	lea	(DATA_WRITEREQUEST2-DT,a4),a1
-	jmp	(_LVOCloseDevice,a6)		; ***
+	jmp	(_LVOCloseDevice,a6)
 
 ;****************************************************************
 ;*	  THIS AREA CONTAINS ALL INCLUDE FILES ROUTINES		*
 ;****************************************************************
 
 INCLUDE_POINTER:
-	bsr	MenNemeNaamEnPad
+	bsr	JoinIncAndIncdir
 	lea	(FIRST_INCLUDE_PTR-DT,a4),a2
 .loop1:
 	move.l	(a2),d0
@@ -38062,12 +37934,12 @@ INCLUDE_POINTER:
 
 .NOT_FOUND_LOAD:
 	tst	d7	;passone
-	bmi.b	Druk_Includefiles
+	bmi.b	Print_IncludeFiles
 	jmp	(ERROR_IncludeJam).l
 
-Druk_Includefiles:
+Print_IncludeFiles:
 	lea	HInclude.MSG,a0
-	jsr	PRINTINCLUDENAME		; Include : "DH1:TRASH/INCLUDE/devices/keymap.i       "
+	jsr	Print_IncludeName	; Include : "DH1:TRASH/INCLUDE/devices/keymap.i       "
 
 	bsr	GetDiskFileLengte	; =     14926 (=$00003A4E )
 	bsr	IncludeAllocMem
@@ -38115,24 +37987,24 @@ Druk_Includefiles:
 	bne.b	.loop2
 	move.l	d7,-(sp)
 	moveq.l	#-1,d7
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	move.l	(sp)+,d7
 	movem.l	(sp)+,d0/a2
 	rts
 
 ;*   JOIN_INCDIR_INCNAME_TO_INPUTBUFFER    *
 
-MenNemeNaamEnPad:
+JoinIncAndIncdir:
 	lea	(CurrentAsmLine-DT,a4),a0
 	lea	(INCLUDE_DIRECTORY-DT,a4),a1
 	lea	(SourceCode-DT,a4),a3
-.lopje1:
-	move.b	(a1)+,(a0)+
-	bne.b	.lopje1
+
+.loop:	move.b	(a1)+,(a0)+
+	bne.b	.loop
 	subq.w	#1,a0
-.lopje2:
-	move.b	(a3)+,(a0)+
-	bne.b	.lopje2
+
+.loop2:	move.b	(a3)+,(a0)+
+	bne.b	.loop2
 	rts
 
 ;*   DISK_LENGTH_OF_FILE   *
@@ -38193,7 +38065,7 @@ C172D2:
 
 C172E0:
 	move.l	(sp)+,d1
-	jsr	(_LVOUnLock,a6)			; ***
+	jsr	(_LVOUnLock,a6)
 	move.l	(incFileLength-DT,a4),d0
 	rts
 
@@ -38211,10 +38083,10 @@ IncludeAllocMem:
 	move.l	d0,-(sp)
 	lea	(CurrentAsmLine-DT,a4),a0
 	moveq	#12,d1
-.lopje:
-	addq.l	#1,d1
+
+.loop:	addq.l	#1,d1
 	tst.b	(a0)+
-	bne.b	.lopje
+	bne.b	.loop
 	add.l	d1,d0
 	move.l	d0,-(sp)
 	moveq	#0,d1
@@ -38225,39 +38097,36 @@ IncludeAllocMem:
 	bne.b	.memok
 	jmp	(ERROR_WorkspaceMemoryFull).l
 
-.memok:
-	add.l	d1,(INCLUDE_CONSUMPTION-DT,a4)
+.memok:	add.l	d1,(INCLUDE_CONSUMPTION-DT,a4)
 	move.l	d0,a2
 	clr.l	(a2)+
 	move.l	d1,(a2)+
 
 	lea	(CurrentAsmLine-DT,a4),a0
-.lopje3:
-	move.b	(a0)+,(a2)+
-	bne.b	.lopje3
+.loop2:	move.b	(a0)+,(a2)+
+	bne.b	.loop2
 	move.l	(sp)+,d0
 	rts
 
 ;*   Deallocate all includes   *
 
-ZapIncludes:
+Zap_Includes:
 	clr.l	(INCLUDE_CONSUMPTION-DT,a4)
 	lea	(FIRST_INCLUDE_PTR-DT,a4),a2
 	move.l	(a2),d2
 	clr.l	(a2)
-.lopje:
-	tst.l	d2
-	beq.b	.klaar
+
+.loop:	tst.l	d2
+	beq.b	.done
 	move.l	d2,a2
 	move.l	(4,a2),d0
 	move.l	a2,a1
 	move.l	(a2),d2
 	move.l	(4).w,a6
 	jsr	(_LVOFreeMem,a6)
-	bra.b	.lopje
+	bra.b	.loop
 
-.klaar:
-	rts
+.done:	rts
 
 
 ;;********** IN THIS AREA ALL KEYBOARD ROUTINES ARE PLACED ************
@@ -38270,11 +38139,12 @@ GETKEYNOPRINT:
 	bsr.b	GetKey
 	cmp.b	#$80,d0
 	bne.b	.noEsc
+
 	bsr.b	GetKey
 	move.b	d0,(edit_EscCode-DT,a4)
 	move	#$80,d0
-.noEsc:
-	move.l	(sp)+,a0
+
+.noEsc:	move.l	(sp)+,a0
 	rts
 
 ;*   GET KEYPRESSION FROM BUFFER   *
@@ -38302,7 +38172,7 @@ GetKey:
 
 .unmarkblock:
 	move.l	a0,a6
-	jsr	(RegTab_SETALLNOTUPD).l
+	jsr	(LineTab_SETALLNOTUPD).l
 .NextKeyPlease:
 
 	tst.w	PR_WaitTOF
@@ -38338,21 +38208,21 @@ new2old_stuff:
 
 ;*    ASK FOR CHAR    *
 
-messages_get:
+IO_GetKeyMessages:
 	movem.l	d1/a0/a1/a6,-(sp)
-.MainMsgGet:
-	move.l	(KEY_PORT-DT,a4),a0
+
+.loop:	move.l	(KEY_PORT-DT,a4),a0
 	move.l	(4).w,a6
 	jsr	(_LVOGetMsg,a6)
 	move.l	d0,(KEY_MSG-DT,a4)
-	beq.b	.NoMoreMsg
-	movem.l	d1-d7/a1-a3/a5,-(sp)
-	bsr	handle_main_msgs
-	movem.l	(sp)+,d1-d7/a1-a3/a5
-	bra.b	.MainMsgGet
+	beq.b	.done
 
-.NoMoreMsg:
-	move	(KeyboardInBuf-DT,a4),d0
+	movem.l	d1-d7/a1-a3/a5,-(sp)
+	bsr	HandleKeyMessages
+	movem.l	(sp)+,d1-d7/a1-a3/a5
+	bra.b	.loop
+
+.done:	move	(KeyboardInBuf-DT,a4),d0
 	sub	(KeyboardOutBuf-DT,a4),d0
 	movem.l	(sp)+,d1/a0/a1/a6
 	tst	d0
@@ -38364,7 +38234,7 @@ KEY_RETURN_LAST_KEY:
 	move.b	(edit_EscCode-DT,a4),d0
 	bra.b	KEYBUFFERPUTCHAR
 
-C17412:
+KEYBUFFERPUTESC:
 	move	d0,-(sp)
 	move.b	#$80,d0
 	bsr.b	KEYBUFFERPUTCHAR
@@ -38418,7 +38288,7 @@ GetAnyChar:
 	move.l	(KEY_PORT-DT,a4),a0
 	jsr	(_LVOGetMsg,a6)
 	move.l	d0,(KEY_MSG-DT,a4)
-	bne.b	handle_main_msgs
+	bne.b	HandleKeyMessages
 	br	C17A44
 
 NoMsgInBase:
@@ -38433,36 +38303,39 @@ NoMsgInBase:
 
 .handle_debug_msgs:
 	tst.l	debug_winbase		; handle debug win msg's
-	beq.w	handle_main_msgs
+	beq.w	HandleKeyMessages
 
 	move.l	d0,a3
 	move.l	44(a3),a3		; windowptr
 	cmp.l	debug_winbase,a3
-	bne.s	handle_main_msgs
+	bne.s	HandleKeyMessages
 
 	jsr	Debug_check_msg
 	tst.l	debug_winbase		; handle debug win msg's
-	beq.w	handle_main_msgs
+	beq.w	HandleKeyMessages
 
-	bra.w	nomore_mgs
+	bra.w	IO_KeyMessagesDone
 
 
-handle_main_msgs:			; handle normal msg's
+HandleKeyMessages:			; handle normal msg's
 	move.l	d0,a3
 	move.l	im_Class(a3),d3
+
 	move.l	d3,d1
 	and.l	#IDCMP_MOUSEBUTTONS,d1
 	bne	check_mouse
+
 	move.l	d3,d1
 	and.l	#IDCMP_MENUPICK,d1
 	bne	check_menus
+
 	move.l	d3,d1
 	and.l	#IDCMP_RAWKEY,d1
-	beq	nomore_mgs
+	beq	IO_KeyMessagesDone
 ;check_keys:
 	move	im_Code(a3),d4
 	btst	#IECODEB_UP_PREFIX,d4	; special key (alt,ctrl,shift..)
-	bne	nomore_mgs
+	bne	IO_KeyMessagesDone
 	move	im_Qualifier(a3),d5
 	move.l	im_IAddress(a3),a0
 	move.l	(a0),d6
@@ -38500,6 +38373,7 @@ check_numpad_keys:
 	beq	key_DOWN
 	cmp	#$1F,d4			; PAGE DOWN
 	beq	key_SHIFT_DOWN
+
 key_CONV:
 	lea	(MY_EVENT-DT,a4),a0
 	lea	(KEY_BUFFER-DT,a4),a1
@@ -38510,36 +38384,38 @@ key_CONV:
 	subq.l	#1,d0
 	tst.l	d0
 	bpl.b	key_NoZero
-	br	nomore_mgs
+	br	IO_KeyMessagesDone
 
 key_NoZero:
 	lea	(KEY_BUFFER-DT,a4),a1
 	move.b	(a1),d1
 	cmp.b	#$9B,d1
-	beq	nomore_mgs
+	beq	IO_KeyMessagesDone
+
 key_GoAnyway:
 	lea	(OwnKeyBuffer-DT,a4),a0
 	move	(KeyboardOutBuf-DT,a4),d1
-.Copy:
-	move.b	(a1)+,(a0,d1.w)
+
+.copy:	move.b	(a1)+,(a0,d1.w)
 	addq.b	#1,d1
-	dbra	d0,.Copy
+	dbra	d0,.copy
+
 	move	d1,(KeyboardOutBuf-DT,a4)
-	br	nomore_mgs
+	br	IO_KeyMessagesDone
 
 check_mouse:
 	btst	#SB3_EDITORMODE,(SomeBits3-DT,a4)	;editor
-	beq	nomore_mgs
+	beq	IO_KeyMessagesDone
 	move	($0018,a3),d1
 	cmp.b	#$68,d1
 	beq.b	OokIetsMetXY
 	cmp.b	#$E8,d1
 	beq.b	C175E2
-	br	nomore_mgs
+	br	IO_KeyMessagesDone
 
 C175E2:
 	bclr	#SB1_MOUSE_KLIK,(SomeBits-DT,a4)
-	br	nomore_mgs
+	br	IO_KeyMessagesDone
 
 OokIetsMetXY:
 	bset	#SB1_MOUSE_KLIK,(SomeBits-DT,a4)
@@ -38560,7 +38436,7 @@ C17622:
 	move	d0,(NieuwMouseX-DT,a4)	;X
 	move	d1,(NieuwMouseY-DT,a4)	;Y
 	movem.l	(sp)+,d0/d1/a5
-	br	nomore_mgs
+	br	IO_KeyMessagesDone
 
 ctrl_key_pressed:
 	cmp.b	#$40,d4
@@ -38568,12 +38444,12 @@ ctrl_key_pressed:
 	lea	(SomeKeyTable,pc),a0
 	ext.w	d4
 	and	#3,d5
-	beq.b	C1764A
+	beq.b	.skip
 	add	#$0040,a0
-C1764A:
-	move.b	(a0,d4.w),d0
-	cmp.b	(B2BEB8-DT,a4),d0	; check if commandline mode?
-	beq	C17A62
+
+.skip:	move.b	(a0,d4.w),d0
+	cmp.b	(B2BEB8-DT,a4),d0	; break allowed?
+	beq	key_BREAK
 	br	SentEscKey
 
 SomeKeyTable:	; SomeKeyTable + RAWKEY = ESC CODE
@@ -38630,6 +38506,7 @@ RawKeyDecode:
 	beq	key_AMIGA
 	cmp	#IEQUALIFIER_RCOMMAND,d1	;RAMIGA
 	beq	key_AMIGA
+
 key_NOCTRL:
 	move	d5,d1
 	and	#3,d1				;SHIFTKEYS
@@ -38637,6 +38514,7 @@ key_NOCTRL:
 	move	d5,d1
 	and	#$30,d1				;ALTKEYS
 	bne	key_ALT
+
 key_NORMAL:
 	cmp	#$4C,d4
 	beq	key_UP
@@ -38695,9 +38573,9 @@ key_CTRL:
 	tst.b	(PR_CtrlUp_Down).l
 	beq	key_NOCTRL
 	cmp	#$4C,d4
-	beq	key_HOME
+	beq	key_HOME		; CTRL+UP
 	cmp	#$4D,d4
-	beq	C17888
+	beq	key_END			; CTRL+DOWN
 	br	key_NOCTRL
 
 key_AMIGA:
@@ -38836,12 +38714,8 @@ key_NUM_5:
 	moveq	#13,d0
 	br	SentEscKey
 
-C17888:
-	moveq	#$40,d0
-	br	SentEscKey
-
 key_HELP:
-	moveq	#$65,d0				;amiguide
+	moveq	#$65,d0				; amiguide
 	br	SentEscKey
 
 key_F1:
@@ -38935,7 +38809,7 @@ check_menus:
 	move	($001A,a3),(IEQUAL-DT,a4)	;qualifier
 	move	($0018,a3),d0			;menunr
 	cmp	#$FFFF,d0
-	beq	nomore_mgs
+	beq	IO_KeyMessagesDone
 	lea	(KEY_BUFFER-DT,a4),a2
 	bra.b	go_check_menu_item
 
@@ -38947,7 +38821,7 @@ C1797E:
 	lea	(KEY_BUFFER-DT,a4),a1
 	sub.l	a1,d0
 	subq.l	#1,d0
-	bmi.w	nomore_mgs
+	bmi.w	IO_KeyMessagesDone
 	br	key_GoAnyway
 
 go_check_menu_item:
@@ -38975,7 +38849,7 @@ NoNormalKey:
 	move	d5,d1
 	move.b	(a0)+,d0
 	beq.b	C1797E
-	cmp.b	#$58,d0	
+	cmp.b	#$58,d0
 	beq.b	C17A10
 	and	#$00C0,d1
 	beq.b	C17A00
@@ -39003,7 +38877,7 @@ C17A10:
 	jsr	(closewb).l
 	br	C1797E
 
-nomore_mgs:
+IO_KeyMessagesDone:
 	move.l	(KEY_MSG-DT,a4),a1
 	move.l	(4).w,a6
 	jsr	(_LVOReplyMsg,a6)
@@ -39013,6 +38887,7 @@ nomore_mgs:
 	movem.l	d0-d7/a0-a6,-(sp)
 	jsr	(ChangeSource).l
 	movem.l	(sp)+,d0-d7/a0-a6
+
 C17A44:
 	btst	#SB1_MOUSE_KLIK,(SomeBits-DT,a4)
 	beq.b	.end
@@ -39021,16 +38896,16 @@ C17A44:
 	btst	#SB2_MAKEMACRO,(SomeBits2-DT,a4)
 	bne.b	.end
 	bsr	PlaceCursorByMouseclick
-.end:
-	rts
 
-C17A62:
+.end:	rts
+
+key_BREAK:
 	move	(KeyboardOutBuf-DT,a4),(KeyboardInBuf-DT,a4)
 	clr	d7
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	lea	(Break.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	jmp	(CommandlineInputHandler).l
 
 OpenDevice:
@@ -39041,24 +38916,25 @@ OpenDevice:
 	moveq	#0,d1
 	jsr	(_LVOOpenDevice,a6)
 	tst.l	d0
-	bne.b	C17AB8
+	bne.s	.end
 	move.l	(IOREQ2-DT,a4),(CONSOLEDEVICE-DT,a4)
+	;move.l	IO_DEVICE(a1),(CONSOLEDEVICE-DT,a4)
 	move.l	(MainWindowHandle-DT,a4),a0
 	move.l	($0056,a0),(KEY_PORT-DT,a4)
-	rts
+
+.end:	rts
 
 CloseDevice:
 	lea	(IOREQ-DT,a4),a1
 	move.l	(4).w,a6
 	jsr	(_LVOCloseDevice,a6)
-C17AB8:
 	rts
 
 com_RedirectCMD:
 	bsr.b	C17AF0
 	clr.l	(FileLength-DT,a4)
 	moveq	#8,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 	bsr	IO_OpenFile
 	bclr	#SB1_CLOSE_FILE,(SomeBits-DT,a4)
 	move.l	(Bestand-DT,a4),(L2BD22-DT,a4)
@@ -39081,11 +38957,11 @@ C17AF0:
 C17B06:
 	rts
 
-com_read:
+com_read:				; R
 	clr.l	(FileLength-DT,a4)
 	move.b	(a6),d0
 	move.b	d0,d3
-	cmp.b	#'0',d0				; Check commands R0 to R9
+	cmp.b	#'0',d0			; Check commands R0 to R9
 	blt.b	NoReadRecentSource
 	cmp.b	#'9',d0
 	bgt.b	NoReadRecentSource
@@ -39113,22 +38989,24 @@ NoReadRecentSource:
 COM_ReadNormal:
 	move.b	(CurrentSource-DT,a4),d0
 	move.b	d0,(B30174-DT,a4)
-	bsr	C141CE
-	jsr	C141C8
+	bsr	SetTitle_Source
+	;jsr	C141C8
+	bsr	CheckUnsaved
 	moveq	#16,d0		;#?
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 	bra.b	C17B66
 	
 Com_ReadSourceReq:
 	move.b	(CurrentSource-DT,a4),d0
 	move.b	d0,(B30174-DT,a4)
-	bsr	C141CE
-	jsr	C141C8
-	moveq	#0,d0				; src extention like (.asm|.s)
-	bsr	FileReqStuff
+	bsr	SetTitle_Source
+	;jsr	C141C8
+	bsr	CheckUnsaved
+	moveq	#0,d0			; src extention like (.asm|.s)
+	bsr	ShowFileReq
 C17B66:
-	bsr	C17CBE
-	bsr	C14232
+	bsr	ReadSourceFile
+	bsr	SetupNewSourceBuffer
 	bsr	C17C04
 	bsr	OpenOldFile
 	st	(Marksinsource-DT,a4)
@@ -39139,7 +39017,7 @@ C17B66:
 	bsr	C181F4
 	bclr	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 	bsr	C17B9E
-	jmp	(C1382).l			; -*- <Just Removed a rts here>
+	rts
 
 ; -*-
 ; --- Load a Recent file ---
@@ -39158,8 +39036,9 @@ SourceAlreadyLoaded:
 	bsr.b	GetRecentfile
 	move.b	(CurrentSource-DT,a4),d0
 	move.b	d0,(B30174-DT,a4)
-	bsr	C141CE
-	jsr	C141C8
+	bsr	SetTitle_Source
+	;jsr	C141C8
+	bsr	CheckUnsaved
 	jsr	C180E8				; Set name to title
 	br	C17B66
 
@@ -39466,37 +39345,35 @@ C17C04:
 	movem.l	a0/a1,-(sp)
 	lea	(PrevDirnames-DT,a4),a0
 	lea	(LastFileNaam-DT,a4),a1
-C17C10:
-	tst.b	(a0)
-	beq.b	C17C18
-	move.b	(a0)+,(a1)+
-	bra.b	C17C10
 
-C17C18:
-	cmp.b	#$3A,(-1,a1)
-	beq.b	C17C34
-	cmp.b	#$2F,(-1,a1)
-	beq.b	C17C34
+.loop:	tst.b	(a0)
+	beq.b	.done
+	move.b	(a0)+,(a1)+
+	bra.b	.loop
+
+.done:	cmp.b	#":",(-1,a1)
+	beq.b	.found
+	cmp.b	#"/",(-1,a1)
+	beq.b	.found
 	cmp.l	#LastFileNaam,a1
-	beq.b	C17C34
-	move.b	#$2F,(a1)+
-C17C34:
-	lea	(CurrentAsmLine).l,a0
-C17C3A:
-	cmp.b	#$3A,(a0)
-	beq.b	C17C46
-	tst.b	(a0)+
-	bne.b	C17C3A
-	bra.b	C17C4A
+	beq.b	.found
+	move.b	#"/",(a1)+
 
-C17C46:
-	lea	(LastFileNaam-DT,a4),a1
-C17C4A:
-	lea	(CurrentAsmLine).l,a0
-C17C50:
-	move.b	(a0)+,(a1)+
+.found:	lea	(CurrentAsmLine).l,a0
+
+.loop2:	cmp.b	#":",(a0)
+	beq.b	.col
+	tst.b	(a0)+
+	bne.b	.loop2
+	bra.b	.eol
+
+.col:	lea	(LastFileNaam-DT,a4),a1
+.eol:	lea	(CurrentAsmLine).l,a0
+
+.loop3:	move.b	(a0)+,(a1)+
 	tst.b	(a0)
-	bne.b	C17C50
+	bne.b	.loop3
+
 	clr.b	(a1)
 	movem.l	(sp)+,a0/a1
 	rts
@@ -39528,7 +39405,7 @@ SaveMarksOpnieuwIstalleren:
 
 	tst	(Marksinsource-DT,a4)
 	beq.b	.nomarks
-	move.l	(sourcestart-DT,a4),d0
+	move.l	(SourceStart-DT,a4),d0
 	lea	(Mark1set-DT,a4),a2
 	moveq	#10-1,d7
 .lopje:
@@ -39545,7 +39422,7 @@ checknewsavemarks:
 	bne.s	GeenSaveMarks
 	tst	(Marksinsource-DT,a4)
 	beq.b	.nomarks
-	move.l	(sourcestart-DT,a4),d0
+	move.l	(SourceStart-DT,a4),d0
 	lea	(Mark1set-DT,a4),a2
 	moveq	#10-1,d7
 .lopje:
@@ -39578,22 +39455,22 @@ GeenSaveMarks:
 	movem.l	(sp)+,d0-d7/a0-a6
 	rts
 
-C17CBE:
+ReadSourceFile:	; read source file
 	movem.l	d0-d4/a0/a6,-(sp)
 	move.l	(DosBase-DT,a4),a6
 	move.l	#CurrentAsmLine,d1
 	moveq.l	#-2,d2
 	jsr	(_LVOLock,a6)
 	tst.l	d0
-	bne.b	C17CEE
+	bne.b	.skip
 	lea	(SourceCode-DT,a4),a0
 	move.l	a0,d1
 	moveq.l	#-2,d2
 	jsr	(_LVOLock,a6)
 	tst.l	d0
-	beq.b	C17D16
-C17CEE:
-	move.l	d0,-(sp)
+	beq.b	.end
+
+.skip:	move.l	d0,-(sp)
 	move.l	d0,d1
 	lea	(ParameterBlok-DT,a4),a0
 	move.l	a0,d2
@@ -39605,13 +39482,12 @@ C17CEE:
 	lea	(ParameterBlok-DT,a4),a0
 	move.l	($007C,a0),d0
 	cmp.l	d1,d0
-	bgt.b	C17D1C
-C17D16:
-	movem.l	(sp)+,d0-d4/a0/a6
+	bgt.b	.nomem
+
+.end:	movem.l	(sp)+,d0-d4/a0/a6
 	rts
 
-C17D1C:
-	movem.l	(sp)+,d0-d4/a0/a6
+.nomem:	movem.l	(sp)+,d0-d4/a0/a6
 	lea	(Notenoughwork.MSG).l,a0
 	moveq	#0,d7
 	jsr	(beeldtextaf).l
@@ -39626,7 +39502,7 @@ COM_ReadProject:
 	cmp.b	#" ",(a6)
 	beq	C1806A
 	moveq	#14,d0				; readproject
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 C17D50:
 	clr.l	(FileLength-DT,a4)
 	bsr	OpenOldFile
@@ -39642,7 +39518,7 @@ C17D50:
 	cmp.l	#"APRJ",(a0)
 	beq.b	C17D8E
 	moveq	#-3,d7
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	jmp	(_ERROR_ThisisnotaAsmProj).l
 
 C17D8E:
@@ -39670,7 +39546,7 @@ C17D9A:
 	move.l	a0,d2
 	moveq	#2,d3
 	bsr	read_nr_d3_bytes
-	bsr	C14232
+	bsr	SetupNewSourceBuffer
 	lea	(LastFileNaam-DT,a4),a0
 	move.l	a0,d2
 	move.l	#$00000100,d3
@@ -39737,7 +39613,7 @@ C17DFC:
 	move.l	a0,-(sp)
 	dbra	d7,C17DFC
 	addq.w	#4,sp
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	lea	(LastFileNaam-DT,a4),a0
 	lea	(CurrentAsmLine-DT,a4),a1
 C17EA2:
@@ -39780,7 +39656,7 @@ C17EE8:
 C17EFC:
 	bsr	C17B98
 	movem.l	d7/a0,-(sp)
-	jsr	(C17CBE).l
+	jsr	(ReadSourceFile).l
 	movem.l	(sp),d7/a0
 	lea	(ParameterBlok-DT,a4),a3
 	move.l	($007C,a3),d0
@@ -39831,7 +39707,7 @@ C17EFC:
 	jmp	ERROR_WorkspaceMemoryFull
 
 C17F9C:
-	move.l	(sourcestart-DT,a4),d2
+	move.l	(SourceStart-DT,a4),d2
 	tst.l	(CS_FirstLinePtr,a0)
 	beq.b	C17FAA
 	add.l	(CS_FirstLinePtr,a0),d2
@@ -39855,7 +39731,7 @@ C17FD6:
 	bne.b	C17FCC
 	move.b	#$1A,(a1)
 	movem.l	d7/a0,-(sp)
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	movem.l	(sp)+,d7/a0
 C17FEC:
 	lea	(CS_size,a0),a0
@@ -39911,9 +39787,10 @@ C1806A:
 com_readFileNoReq:
 	move.b	(CurrentSource-DT,a4),d0
 	move.b	d0,(B30174-DT,a4)
-	bsr	C141CE
+	bsr	SetTitle_Source
 	move.l	a6,a5
-	jsr	(C141C8).l
+	;jsr	(C141C8).l
+	bsr	CheckUnsaved
 	move.l	a5,a6
 	bsr.b	C180C4
 	bsr.b	C180E8
@@ -39941,12 +39818,12 @@ C180BA:
 	clr.b	(a0)
 	rts
 
-C180C4:
+C180C4:	; clean whitspace and terminate string?
 	lea	(CurrentAsmLine).l,a0
 C180CA:
-	cmp.b	#$20,(a6)
+	cmp.b	#$20,(a6)		; SPC
 	beq.b	C180D8
-	cmp.b	#9,(a6)
+	cmp.b	#9,(a6)			; TAB
 	beq.b	C180D8
 	bra.b	C180DC
 
@@ -40046,8 +39923,8 @@ SetScreenColors:
 	move.l	(GfxBase-DT,a4),a6
 	moveq	#16-1,d7
 	moveq	#0,d4
-.loop:
-	move	d4,d0
+
+.loop:	move	d4,d0
 	lea	(ScrColors-DT,a4),a0
 	mulu	#6,d0
 	lea	(a0,d0.w),a0
@@ -40060,12 +39937,12 @@ SetScreenColors:
 	dbra	d7,.loop
 	rts
 
-C181DA:
+QueryInsertSource:
 	clr.l	(FileLength-DT,a4)
 	moveq	#10,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 C181E4:
-	bsr	C17CBE
+	bsr	ReadSourceFile
 	bsr	OpenOldFile
 	clr	(Marksinsource-DT,a4)
 	bsr	SaveMarksOpnieuwIstalleren
@@ -40081,20 +39958,20 @@ C181FE:
 	movem.l	(sp)+,a2/a5
 	sub.l	a5,d0
 	beq.b	C18260
-	cmp.b	#$1A,(-1,a5,d0.l)
-	bne.b	C18224
+	cmp.b	#$1A,(-1,a5,d0.l)	; EOF
+	bne.b	.skip
 	subq.l	#1,d0
-C18224:
-	move.l	d0,a1
+
+.skip:	move.l	d0,a1
 	move.l	a2,a3
-	jsr	(EDITOR_MAKEHOLE_A1LONG).l
+	jsr	(E_ExtendCutBuffer).l
 	move.l	d0,d1
 	tst	(Marksinsource-DT,a4)
 	bne.b	C18256
 	jsr	(MOVEMARKS).l
 	bra.b	C18256
 
-C1823E:
+Insert_Source:
 	clr.l	(FileLength-DT,a4)
 	bsr	C180C4
 	tst.b	(PR_SourceExt).l
@@ -40102,15 +39979,16 @@ C1823E:
 	bsr	C1809A
 	bra.b	C181E4
 
-C18254:
+C18255:
 	move.b	(a5)+,(a2)+
 C18256:
-	dbra	d0,C18254
+	dbra	d0,C18255
 	cmp	#$2000,d1
 	beq.b	C181FE
 C18260:
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	jmp	(C12688).l
+
 
 Com_ReadObject:
 	addq.w	#1,a6
@@ -40120,7 +39998,7 @@ Com_ReadObject:
 	cmp.b	#$20,(a6)
 	beq.b	C182B8
 	moveq	#4,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 C1827E:
 	move.l	#CurrentAsmLine,d1
 	move.l	(DosBase-DT,a4),a6
@@ -40164,7 +40042,7 @@ Com_ReadBin:
 	cmp.b	#" ",(a6)
 	beq	.nofilereq
 	moveq	#2,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 .resume:
 	bsr	OpenOldFile
 	moveq	#-1,d7
@@ -40176,11 +40054,11 @@ Com_ReadBin:
 	moveq	#0,d7
 	move.l	d2,(MEM_DIS_DUMP_PTR-DT,a4)
 	bsr.b	read_nr_d3_bytes
-	br	close_bestand
+	br	IO_CloseFile
 
 .notdone:
 	bset	#SB3_EDITORMODE,(SomeBits3-DT,a4)	;editor
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	bclr	#SB3_EDITORMODE,(SomeBits3-DT,a4)	;editor
 	rts
 	
@@ -40242,7 +40120,7 @@ IO_OpenFile:
 	jsr	(_LVOUnLock,a6)
 	tst.b	(Safety-DT,a4)
 	bne.b	OPENFILE_NOASK
-	jsr	(C142D4).l
+	jsr	(QueryOverwrite).l
 OPENFILE_NOASK:
 	jsr	DeactivateMsgs
 	move.l	(DosBase-DT,a4),a6
@@ -40252,10 +40130,10 @@ OPENFILE_NOASK:
 	bra.w	C18342
 
 C183B8:
-	bsr.b	close_bestand
+	bsr.b	IO_CloseFile
 	jmp	(ERROR_NoFileSpace).l
 
-close_bestand:
+IO_CloseFile:
 	bclr	#SB1_CLOSE_FILE,(SomeBits-DT,a4)
 	move.l	(Bestand-DT,a4),d1
 C183CA:
@@ -40287,14 +40165,14 @@ C183FE:
 	moveq	#$4E,d1
 PrintStatusInfo0:
 	moveq	#$2D,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,PrintStatusInfo0
-	br	druk_cr_nl
+	br	Print_NewLine
 
 PrintStatusInfoE:
 	bsr.b	C183FE
 	lea	(Name.MSG,pc),a0
-	br	printthetext
+	br	Print_Text
 
 C18418:
 	move.l	(4,sp),d0
@@ -40302,16 +40180,16 @@ C18418:
 	lsl.l	#1,d0
 	bsr	PI_druklinenr
 	lea	(BytesFree.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(8,sp),d0
 	lsl.l	#8,d0
 	lsl.l	#1,d0
 	bsr	PI_druklinenr
 	lea	(BytesUsed.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	bsr.b	C183FE
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	(sp)+,a3
 	addq.w	#8,sp
 	jmp	(a3)
@@ -40367,13 +40245,13 @@ C184AA:
 
 ViewMemDirectory:
 	lea	(Memorydirecto.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	bsr	PrintStatusInfoE
 	addq.w	#4,a5			 	; pass header
 	moveq	#30-1,d1
 C184BE:
 	move.b	(a5)+,d0			; print path
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C184BE
 	tst.b	(a5)+
 	bne.b	C184D4
@@ -40387,32 +40265,32 @@ C184D4:
 	moveq	#2,d5				; 2 cols
 PrintFilesMemLoop:
 	subq.w	#1,d6
-	bmi.w	druk_cr_nl
+	bmi.w	Print_NewLine
 	move.l	(a5)+,d0			; file length
 	bmi.b	PrintMemDir			; it is a directory ?
 	moveq	#$20,d3
 	lea	(TABEL_HEXTODECFILE,pc),a0
 	bsr	C15980
-	bsr	druk_af_space
+	bsr	Print_Space
 	bra.b	C18504
 
 PrintMemDir:
 	lea	(dir.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 C18504:
 	moveq	#30-1,d1
 C18506:
 	move.b	(a5)+,d0			; print filename
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C18506
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	subq.w	#1,(W13C38).l
 	bne.b	C18540
 	bsr	GETKEYNOPRINT
 	cmp.b	#$1B,d0
 	bne.b	C18532
-	br	druk_cr_nl
+	br	Print_NewLine
 
 C18532:
 	move	(ScreenHight-DT,a4),d0
@@ -40422,7 +40300,7 @@ C18532:
 C18540:
 	subq.w	#1,d5
 	bne.b	PrintFilesMemLoop
-	bsr	druk_cr_nl			; next row
+	bsr	Print_NewLine			; next row
 	moveq	#2,d5				; getting started for 2 cols
 	bra.b	PrintFilesMemLoop
 
@@ -40528,8 +40406,7 @@ C1865C:
 	lea	(PrevDirnames-DT,a4),a1
 	bra.b	C1864E
 
-; V - view dir command
-com_show_dir:
+com_show_dir:				; V
 	move	(ScreenHight-DT,a4),d0
 	subq.w	#4,d0
 	add.w	d0,d0
@@ -40538,15 +40415,15 @@ com_show_dir:
 	lea	(B2A015-DT,a4),a0
 	lea	(MEMDIR_BUFFER-DT,a4),a5
 	tst.b	(a0)
-	bne.b	C1869A
-	cmp.l	#$12131415,(a5)			; go to mem directory
+	bne.b	.chng
+
+	cmp.l	#$12131415,(a5)		; go to mem directory
 	beq	ViewMemDirectory
 	cmp.l	#$51413121,(a5)
-	bne.b	C1869A
+	bne.b	.chng
 	jmp	(ERROR_Novalidmemory).l
 
-C1869A:
-	cmp.b	#$20,(a0)			; V xxx = just set current dir
+.chng:	cmp.b	#" ",(a0)		; V xxx = just set current dir
 	beq	SetViewCurrentDir
 	move.l	#$12131415,(a5)+
 	clr	(MEMDIR_ANTAL-DT,a4)
@@ -40554,19 +40431,19 @@ C1869A:
 	moveq	#-2,d2
 	jsr	(_LVOLock,a6)
 	tst.l	d0
-	bne	C186D8
+	bne	.ok
 	move.l	#0,(L2C05E-DT,a4)
 	move.l	#0,(L2C062-DT,a4)
 	move.l	#$51413121,(MEMDIR_BUFFER-DT,a4)
 	jmp	(ERROR_IllegalPath).l
 
-C186D8:
-	lea	(ParameterBlok-DT,a4),a0
+.ok:	lea	(ParameterBlok-DT,a4),a0
 	move.l	a0,d2
 	moveq	#60-1,d7
-C186E0:
-	move.l	#0,(a0)+
-	dbra	d7,C186E0
+
+.loop:	move.l	#0,(a0)+
+	dbra	d7,.loop
+
 	move.l	d0,d1
 	move.l	d1,-(sp)
 	jsr	(_LVOExamine,a6)
@@ -40617,14 +40494,14 @@ C18790:
 	move.b	(a0)+,d0			; store path
 	beq.b	C187A0
 	move.b	d0,(a5)+
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C18790
 	bra.b	C187AC
 
 C187A0:
 	moveq	#$20,d0
 	move.b	d0,(a5)+
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C187A0
 C187AC:
 	clr.b	(a5)+
@@ -40652,13 +40529,13 @@ C187D6:
 	moveq	#$20,d3
 	lea	(TABEL_HEXTODECFILE,pc),a0
 	bsr	C15980
-	bsr	druk_af_space
+	bsr	Print_Space
 	bra.b	C18800
 
 C187F2:
 	move.l	#$FFFFFFFF,(a5)+		; dir flag
 	lea	(dir.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 C18800:
 	lea	(L2BF54-DT,a4),a0
 	moveq	#30-1,d1
@@ -40666,19 +40543,19 @@ C18806:
 	move.b	(a0)+,d0
 	beq.b	C18816
 	move.b	d0,(a5)+
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C18806
 	bra.b	C18822
 
 C18816:
 	moveq	#$20,d0
 	move.b	d0,(a5)+
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C18816
 C18822:
 	addq.w	#1,(MEMDIR_ANTAL-DT,a4)
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	(DosBase-DT,a4),a6
 	move.l	(2,sp),d1
 	move.l	#ParameterBlok,d2
@@ -40686,7 +40563,7 @@ C18822:
 	tst	d0
 	bne.b	C1884E
 	addq.l	#6,sp
-	br	druk_cr_nl
+	br	Print_NewLine
 
 C1884E:
 	subq.w	#1,(W13C38).l
@@ -40695,7 +40572,7 @@ C1884E:
 	cmp.b	#$1B,d0
 	bne.b	C18866
 	addq.l	#6,sp
-	br	druk_cr_nl
+	br	Print_NewLine
 
 C18866:
 	move	(ScreenHight-DT,a4),d0
@@ -40705,7 +40582,7 @@ C18866:
 C18874:
 	subq.w	#1,(sp)
 	bne	C187D6
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	move	#2,(sp)				; 2cols
 	br	C187D6
 
@@ -40728,7 +40605,7 @@ C188AA:
 C188B2:
 	clr.l	(FileLength-DT,a4)
 	tst.b	(LastFileNaam-DT,a4)
-	beq	Com_WriteSource
+	beq	com_WriteSource
 	lea	(CurrentAsmLine-DT,a4),a0
 	lea	(LastFileNaam-DT,a4),a1
 	movem.l	a0/a1,-(sp)
@@ -40764,12 +40641,12 @@ C188B2:
 	clr.b	(a0)				; filename without .BACKUP
 
 	lea	(Updating.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	lea	(CurrentAsmLine-DT,a4),a0
-	bsr	printthetext
-	bsr	druk_cr_nl
+	bsr	Print_Text
+	bsr	Print_NewLine
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 
 	bsr	OPENFILE_NOASK
 	br	WRITE_DOIT
@@ -40783,7 +40660,7 @@ C188F0:
 
 C188FA:
 	lea	(Sourcenotchan.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	rts
 
 C18904:
@@ -40828,45 +40705,45 @@ C18976:
 C18988:
 	rts
 
-com_write:
+com_write:	; W
 	clr.l	(FileLength-DT,a4)
 	move.b	(a6),d0
 	move.b	d0,d3
 	bclr	#5,d0
 	cmp.b	#'T',d0
-	beq	C1705C
+	beq	com_WriteTrack
 	cmp.b	#'O',d0
-	beq	C196F8
+	beq	com_WriteObject
 	cmp.b	#'S',d0
-	beq	C17048
+	beq	com_WriteSector
 	cmp.b	#'B',d0
-	beq	Com_WriteBin
+	beq	com_WriteBin
 	cmp.b	#'P',d0
-	beq	Write_Prefs
+	beq	com_WritePrefs
 	cmp.b	#'L',d0
-	beq	C19176
+	beq	com_WriteLink
 	cmp.b	#'E',d0
-	beq	C18A94
+	beq	com_WriteEnvironment
 	cmp.b	#'N',d0
-	beq	Com_WriteNormal
+	beq	com_WriteNormal
 	cmp.b	#' ',d3
 	beq	C18A68
 	tst.b	(a6)
-	beq.b	Com_WriteSource
+	beq.b	com_WriteSource
 	jmp	(ERROR_IllegalComman).l
 
-Com_WriteNormal:
+com_WriteNormal:
 	moveq	#15,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 	move.w	PR_SaveMarks,-(sp)
 	bclr	#0,(PR_SaveMarks).l
 	bsr	C189E6
 	move.w	(sp)+,PR_SaveMarks
 	rts
 	
-Com_WriteSource:
+com_WriteSource:
 	moveq	#1,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 C189E6:
 	bsr	IO_OpenFile
 WRITE_DOIT:
@@ -40874,7 +40751,7 @@ WRITE_DOIT:
 	bsr	C17B9E
 	bsr	C17C04
 	bsr.b	C18A2A
-	move.l	(sourcestart-DT,a4),a0
+	move.l	(SourceStart-DT,a4),a0
 C189FC:
 	lea	(ParameterBlok-DT,a4),a1
 	move.l	a1,d2
@@ -40904,7 +40781,7 @@ C18A2A:
 	moveq	#85,d3
 ;	move.l	#$F9FAF9FA,(a1)+
 	move.l	#";APS",(a1)+			;) Asm-Pro savemarks
-	move.l	(sourcestart-DT,a4),d1
+	move.l	(SourceStart-DT,a4),d1
 	movem.l	d0-d7/a0,-(sp)
 	lea	(Mark1set-DT,a4),a0
 	moveq	#10-1,d7
@@ -40939,20 +40816,20 @@ C18A68:
 
 C18A84:
 	bsr	IO_WriteFile
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	lea.l	(CurrentAsmLine).l,a3
 	bsr.w	AddRecentFile
 	bclr	#SB1_SOURCE_CHANGED,(SomeBits-DT,a4)
 	rts
 
-C18A94:
+com_WriteEnvironment:
 	movem.l	d0-d7/a0-a6,-(sp)
 	jsr	(C1E2F0).l
 	movem.l	(sp)+,d0-d7/a0-a6
 	cmp.b	#$20,(1,a6)
 	beq	C18C3E
 	moveq	#13,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 C18AB2:
 	movem.l	d0-d7/a0-a6,-(sp)
 	movem.l	a0-a2,-(sp)
@@ -41037,7 +40914,7 @@ C18B76:
 	move.l	(CS_FirstLinePtr,a0),d2
 	tst.l	d2
 	beq.b	C18B9C
-	sub.l	(sourcestart-DT,a4),d2
+	sub.l	(SourceStart-DT,a4),d2
 C18B9C:
 	move.l	d2,(TempDirName-DT,a4)
 	lea	(TempDirName-DT,a4),a1
@@ -41092,7 +40969,7 @@ C18B9C:
 	move.l	a0,d2
 	moveq	#4,d3
 	bsr	IO_WriteFile
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	movem.l	(sp)+,d0-d7/a0-a6
 	rts
 
@@ -41105,11 +40982,11 @@ C18C3E:
 Aprj.MSG:
 	dc.b	'Aprj',0
 
-Com_WriteBin:
+com_WriteBin:
 	cmp.b	#' ',(1,a6)
 	beq.b	C18CB6
 	moveq	#3,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 C18C5C:
 	movem.l	a0/a1,-(sp)
 	lea	(TempDirName-DT,a4),a0
@@ -41140,14 +41017,14 @@ C18C9A:
 	move.l	(TempDirName-DT,a4),d2
 	move.l	(L2E186-DT,a4),d3
 	bsr	IO_WriteFile
-	br	close_bestand
+	br	IO_CloseFile
 
 C18CB6:
 	addq.l	#1,a6
 	bsr	C180C4
 	bra.b	C18C5C
 
-Write_Prefs:
+com_WritePrefs:
 	lea	(Gave_prefs_table).l,a0
 	lea	(ParameterBlok-DT,a4),a1
 Write_prefslopje:
@@ -41304,7 +41181,7 @@ C18DD6:
 	bsr	IO_OpenFile
 	movem.l	(sp)+,d2/d3
 	bsr	IO_WriteFile
-	br	close_bestand
+	br	IO_CloseFile
 
 van_d0_2_string:
 	moveq	#8-1,d7
@@ -41408,7 +41285,7 @@ C18E68:
 	lea	(Prefs_File_Stuff).l,a6
 C18E6E:
 	lea	(Gave_prefs_table).l,a5
-	bsr	C190D2
+	bsr	Prefs_HandleSymbol
 	tst.b	(Safety-DT,a4)
 	beq.b	C18E86
 C18E7E:
@@ -41592,7 +41469,6 @@ checkformem:
 	cmp.w	#4,Scr_NrPlanes
 	bhi.s	.lopje
 .leave:
-;	jsr	test_debug
 
 	move.l	#2,_memtype	;250 kb chipmem
 	move.l	#250,_memamount
@@ -41730,49 +41606,48 @@ RP_Ascii2Long:
 
 ;************* EINDE PREFS INLADEN **************
 
-C190D2:
+Prefs_HandleSymbol:
 	move.b	(a6)+,d0
-	cmp.b	#$20,d0
-	beq.b	C190D2
-	cmp.b	#9,d0
-	beq.b	C190D2
-	pea	(C190D2,pc)
-	cmp.b	#$2B,d0
-	beq.b	C19126
-	cmp.b	#$2D,d0
-	beq.b	C1912E
-	cmp.b	#$21,d0
-	beq.b	change_extention
-	cmp.b	#10,d0
-	beq.b	C190D2
-	cmp.b	#13,d0
-	beq.b	C190D2
+	cmp.b	#$20,d0			; SPC
+	beq.b	Prefs_HandleSymbol
+	cmp.b	#9,d0			; TAB
+	beq.b	Prefs_HandleSymbol
+	pea	(Prefs_HandleSymbol,pc)
+	cmp.b	#"+",d0
+	beq.b	Prefs_EnableFeature
+	cmp.b	#"-",d0
+	beq.b	Prefs_DisableFeature
+	cmp.b	#"!",d0
+	beq.b	Prefs_ChangeExtension
+	cmp.b	#10,d0			; LF
+	beq.b	Prefs_HandleSymbol
+	cmp.b	#13,d0			; CR
+	beq.b	Prefs_HandleSymbol
 	subq.w	#1,a6
 	addq.l	#4,sp
 	rts
 
-change_extention:
+Prefs_ChangeExtension:
 	lea	(S.MSG).l,a0
+
 	moveq	#16-1,d1
-C19110:
-	move.b	(a6)+,d0
+.loop:	move.b	(a6)+,d0
 	cmp.b	#' ',d0
-	bls.b	C19120
+	bls.b	.end
 	move.b	d0,(a0)+
-	dbra	d1,C19110
+	dbra	d1,.loop
 	
 	addq.w	#1,a6
-C19120:
-	clr.b	(a0)+
+.end:	clr.b	(a0)+
 	subq.w	#1,a6
 	rts
 
-C19126:
+Prefs_EnableFeature:
 	bsr.b	C19136
 	bset	#0,(a1)
 	rts
 
-C1912E:
+Prefs_DisableFeature:
 	bsr.b	C19136
 	bclr	#0,(a1)
 	rts
@@ -41816,14 +41691,14 @@ C1916E:
 	clr.b	(a0)
 	rts
 
-C19176:
+com_WriteLink:
 	move.l	a6,-(sp)
 	bsr	C19592
 	move.l	(sp)+,a6
 	cmp.b	#$20,(1,a6)
 	beq.b	C191D2
 	moveq	#6,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 C1918C:
 	bsr	IO_OpenFile
 	move.l	(RelocStart-DT,a4),a0
@@ -41843,7 +41718,7 @@ C191A2:
 C191BA:
 	bsr.b	C191DA
 	bsr.b	C19216
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	bsr	C19934
 	move.l	(RelocStart-DT,a4),a0
 	move.l	#$12345678,-(a0)
@@ -42430,14 +42305,14 @@ C196E8:
 C196F6:
 	rts
 
-C196F8:
+com_WriteObject:
 	move.l	a6,-(sp)
 	bsr	C19592
 	move.l	(sp)+,a6
 	cmp.b	#$20,(1,a6)
 	beq.b	C19772
 	moveq	#5,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 C1970E:
 	bsr	IO_OpenFile
 	move.l	(RelocStart-DT,a4),a0
@@ -42463,7 +42338,7 @@ C1973C:
 	bsr	IO_WriteFile
 	bsr	C19966
 	bsr	C19482
-	bsr	close_bestand
+	bsr	IO_CloseFile
 	bsr	C19934
 	move.l	(RelocStart-DT,a4),a0
 	move.l	#$12345678,-(a0)
@@ -42727,11 +42602,11 @@ C19982:
 	sub.l	d2,d3
 	br	IO_WriteFile
 
-C1999E:
+Zap_File:
 	cmp.b	#$20,(a6)
 	beq.b	C199C4
 	moveq	#9,d0
-	bsr	FileReqStuff
+	bsr	ShowFileReq
 C199AA:
 	move.l	(DosBase-DT,a4),a6
 	move.l	#CurrentAsmLine,d1
@@ -42783,7 +42658,7 @@ C199E8:
 	lea	(L2DF4C-DT,a4),a0
 	move.l	#eop_irq_routine,-(a0)
 	move.l	a0,(USP_base-DT,a4)
-	move.l	(sourcestart-DT,a4),(TraceLinePtr-DT,a4)
+	move.l	(SourceStart-DT,a4),(TraceLinePtr-DT,a4)
 	move.l	#1,(TraceLineNr-DT,a4)
 	clr	(MON_EDIT_POSITION-DT,a4)
 	bsr	MON_CLEARCACH
@@ -42801,10 +42676,10 @@ DEBUG_TYPECHANGE:
 	beq.b	.NO_SOURCE1
 	btst	#SB2_INDEBUGMODE,(SomeBits2-DT,a4)
 	bne.b	.NO_SOURCE2
-	jsr	(C2AF6).l
+	jsr	(com_optimize_dbg).l
 	bset	#SB2_INDEBUGMODE,(SomeBits2-DT,a4)
 	moveq	#$30,d0
-	bsr	C17412
+	bsr	KEYBUFFERPUTESC
 	movem.l	d0-d7/a0-a6,-(sp)
 	lea	(B30071-DT,a4),a6
 	tst.b	(a6)
@@ -42837,9 +42712,9 @@ DEBUG_REDRAW:
 	subq.w	#1,d0
 .noDis:
 	jsr	(OPED_SETNBOFFLINES).l
-	bsr	SENDCHARDELSCR
+	bsr	Print_DelScr
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 
 	move.l	(DBTypePtr-DT,a4),a0
 	add	(a0),a0		;DBType_Border
@@ -42872,7 +42747,7 @@ DEBUG_NEXTLINE:
 	bra.w	noAnimate
 
 .run:
-	bsr	messages_get
+	bsr	IO_GetKeyMessages
 	beq.b	Debug_Animate
 	move.b	#0,(Animate-DT,a4)
 	bsr	GETKEYNOPRINT
@@ -42919,12 +42794,12 @@ noAnimate:
 	bsr	RESETMENUTEXT
 	tst.b	(PR_RealtimeDebug).l
 	bne.b	.C19BD8
-	bsr	messages_get
+	bsr	IO_GetKeyMessages
 	bne.b	.GET_ANOTHER
 	br	.C19BE6
 
 .C19BD8:
-	bsr	messages_get
+	bsr	IO_GetKeyMessages
 	tst	d0
 	beq.b	.C19BE6
 	bsr	GETKEYNOPRINT
@@ -42941,7 +42816,6 @@ noAnimate:
 	jsr	(a0)
 
 ;	bclr	#MB1_BLOCKSELECT,(MyBits1-DT,a4)
-;	jsr	test_debug
 
 ;	move	(Cursor_col_pos-DT,a4),-(sp)
 ;	move	(cursor_row_pos-DT,a4),-(sp)
@@ -42990,7 +42864,7 @@ noAnimate:
 	cmp	#$001C,d0		;AMIGA_J
 	beq	DEBUG_JUMP_TO_MARK
 	cmp	#$002C,d0		;AMIGA_Z
-	beq	DEBUG_CLEAR_BP_BUFFER
+	beq	Zap_Breakpoints
 	cmp	#$0024,d0		;AMIGA_R
 	beq	DEBUG_NO_BREAK_PT
 	cmp	#$0025,d0		;AMIGA_S
@@ -43089,9 +42963,9 @@ DEBUG_SetBreakpointhere:
 	br	com_singlestep
 
 DEBUG_ChangefromDx2FPx:
-;	bsr	SENDCHARDELSCR
+;	bsr	Print_DelScr
 ;	moveq	#0,d0
-;	bsr	SENDONECHARNORMAL
+;	bsr	Print_Char
 ;	move.l	(DBTypePtr-DT,a4),a0
 ;	add	(a0),a0
 ;	jsr	(a0)
@@ -43128,9 +43002,9 @@ DEBUG_TYPECHANGE_MAIN:
 ;********  Debug Dis Print  ********
 
 Debug_DissPrint:
-	jsr	(RegTab_SETALLNOTUPD).l
+	jsr	(LineTab_SETALLNOTUPD).l
 	clr.l	(LineFromTop-DT,a4)
-	move.l	(pcounter_base-DT,a4),(RegelPtrsIn-DT,a4)
+	move.l	(pcounter_base-DT,a4),(LinePtrsIn-DT,a4)
 	bsr	iets_met_monitor_output
 	move.l	(MON_TYPE_PTR-DT,a4),a0
 	add	(6,a0),a0
@@ -43146,7 +43020,7 @@ Debug_SourcePrint:
 	moveq.l	#0,d1
 	move	(NrOfLinesInEditor-DT,a4),d1
 	lsr.w	#1,d1
-	jsr	(MoveupNLines).l
+	jsr	(MoveUpNLines).l
 	move.l	a2,a6
 	jsr	E_Move2EndLine
 	jsr	EDITSCRPRINT
@@ -43195,8 +43069,8 @@ Debug_InputMarkMon:
 	lea	(MON_DIS_TYPES,pc),a0
 	move.l	a0,(MON_TYPE_PTR-DT,a4)
 	clr.l	(LineFromTop-DT,a4)
-	jsr	(RegTab_SETALLNOTUPD).l
-	move.l	(pcounter_base-DT,a4),(RegelPtrsIn-DT,a4)
+	jsr	(LineTab_SETALLNOTUPD).l
+	move.l	(pcounter_base-DT,a4),(LinePtrsIn-DT,a4)
 C19EC0:
 	moveq	#0,d7
 	move	(Scr_br_chars-DT,a4),(breedte_editor_in_chars-DT,a4)
@@ -43204,7 +43078,7 @@ C19EC0:
 	move.l	(MON_TYPE_PTR-DT,a4),a0
 	add	(6,a0),a0
 	jsr	(a0)
-	jsr	(messages_get).l
+	jsr	(IO_GetKeyMessages).l
 	jsr	(GETKEYNOPRINT).l
 	cmp.b	#$1B,d0		;ESC
 	beq.b	C19F20
@@ -43236,7 +43110,7 @@ C19F20:
 Debug_InputMark:
 	lea	(Marklocationa.MSG,pc),a0
 	bsr	printTextInMenuStrip
-	jsr	(RegTab_SETALLNOTUPD).l
+	jsr	(LineTab_SETALLNOTUPD).l
 	bra.b	C19F70
 
 C19F40:
@@ -43273,12 +43147,12 @@ C19F70:
 	moveq.l	#0,d1
 	move	(NrOfLinesInEditor-DT,a4),d1
 	lsr.w	#1,d1
-	jsr	(MoveupNLines).l
+	jsr	(MoveUpNLines).l
 	move.l	a2,a6
 	jsr	E_Move2EndLine
 	move	(Scr_br_chars-DT,a4),(breedte_editor_in_chars-DT,a4)
 	jsr	EDITSCRPRINT
-	bsr	messages_get
+	bsr	IO_GetKeyMessages
 C19FA8:
 	bsr	GETKEYNOPRINT
 	cmp.b	#$1B,d0
@@ -43695,7 +43569,7 @@ Debug_SC:
 
 Debug_WTitle:
 	dc.b	'-=REGISTERS=-',0
-    CNOP    0,2
+	even
 
 Debug_adrtxt:
 db_pens:
@@ -43766,8 +43640,6 @@ DebugFP_IText:
 	dc.b	'FP6: 0.00000000 E 0',0
 	dc.b	'FP7: 0.00000000 E 0',0
 
-
-
 ; D0: 00000000
 ; D1: 00000000
 ; D2: 00000000
@@ -43792,19 +43664,7 @@ DebugFP_IText:
 ; VBR=680CCE1C
 ;FPSR=00000000
 
-;db_imagestr:
-;	dc.w    0		0	;offset x
-;	dc.w    0		2	;offset y
-;	dc.w    40		4	;breedte 
-;	dc.w    100		6	;hoogte plaatje
-;	dc.w    2		8	;nr planes
-;	dc.l    smallTRASHlogo	10	;bitmap ptr
-;	dc.b    3		14
-;	dc.b    0		15
-;	dc.l    0		16
-
-
-	cnop	0,4
+	even
 debug_winbase:	dc.l	0
 debug_rp:	dc.l	0
 debug_msg_port:	dc.l	0
@@ -43947,39 +43807,40 @@ teken_logootje_enzo:
 	move.l	(MainVisualInfo-DT,a4),PW_NR+4
 	move.l  (MainVisualInfo-DT,a4),PW_IR+4
 
-	move.l	debug_rp,a0
-	lea.l   PW_NR,a1
-	move.w  #0,d0		;x
-	move.w  #0,d1		;y
-	move.w	d4,d2
-	move.w	d5,d3
+	; TODO DELETE THIS AFTER TESTING
+	;move.l	debug_rp,a0
+	;lea.l   PW_NR,a1
+	;move.w  #0,d0		;x
+	;move.w  #0,d1		;y
+	;move.w	d4,d2
+	;move.w	d5,d3
 	;jsr     _LVODrawBevelBoxA(a6)
 
 	
 	tst.w	db_type
 	beq.w	.nomore
 
-	move.w	(EFontSize_x-DT,a4),d4
-	mulu.w	#14,d4
-	move.w	(EFontSize_y-DT,a4),d5
-	mulu.w	#8,d5
-	add.w	#6,d5	;marge
+	;move.w	(EFontSize_x-DT,a4),d4
+	;mulu.w	#14,d4
+	;move.w	(EFontSize_y-DT,a4),d5
+	;mulu.w	#8,d5
+	;add.w	#6,d5	;marge
 	
 
-	move.l	debug_rp,a0
-	lea.l   PW_NR,a1
-	move.w  d4,d0		;x
-	move.w  d5,d1		;y
-	jsr     _LVODrawBevelBoxA(a6)
+	;move.l	debug_rp,a0
+	;lea.l   PW_NR,a1
+	;move.w  d4,d0		;x
+	;move.w  d5,d1		;y
+	;jsr     _LVODrawBevelBoxA(a6)
 
-	subq.l	#1,d4
-	subq.l	#1,d5
+	;subq.l	#1,d4
+	;subq.l	#1,d5
 
-	move.l	debug_rp,a0
-	lea.l   PW_IR,a1
-	move.w  d4,d0		;x
-	move.w  d5,d1		;y
-	jsr     _LVODrawBevelBoxA(a6)
+	;move.l	debug_rp,a0
+	;lea.l   PW_IR,a1
+	;move.w  d4,d0		;x
+	;move.w  d5,d1		;y
+	;jsr     _LVODrawBevelBoxA(a6)
 
 	move.l	(GfxBase-DT,A4),a6
 	move.l	debug_rp,a1
@@ -44018,10 +43879,6 @@ teken_logootje_enzo:
 
         move.l  debug_rp,a0
 	move.l	IntBase,a6
-	;lea	db_imagestr(pc),a1
-	;move.w	d4,d0	;x-offset
-	;move.w	d5,d1	;y-offset
-	;jsr     (_LVODrawImage,a6)        	; ***
 .nomore:
 	rts
 
@@ -44087,7 +43944,7 @@ open_debug_win:
 
 	move.l  IntBase,a6
 	move.l	(MainWindowHandle-DT,a4),a0
-	jsr	(_LVOActivateWindow,a6)	; ***
+	jsr	(_LVOActivateWindow,a6)
 
 	bsr	drukdata_regs
 	bsr	druk_regs
@@ -44118,7 +43975,7 @@ Debug_check_msg:
 
 	move.l  IntBase,a6
 	move.l	(MainWindowHandle-DT,a4),a0
-	jsr	(_LVOActivateWindow,a6)	 ; ****
+	jsr	(_LVOActivateWindow,a6)
 .NoMsgInBase:
 	movem.l	(sp)+,d0-a6
 	rts
@@ -44313,17 +44170,17 @@ show_breaks_watches:
 
 	movem.l	d0/a0-a3,-(sp)
 
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 
 	move.l	(pcounter_base-DT,a4),d0
 	move.l	d0,a5
 	cmp.l	#eop_irq_routine,d0
 	beq.b	.eop_hier
-	bsr	druk_af_d0		;print pc
-	bsr	druk_af_space
-	bsr	C1588E
+	bsr	Print_D0		;print pc
+	bsr	Print_Space
+	bsr	Print_ClearScreen
 	jsr	(Diss_zetom2ascii).l
-	bsr	printthetext
+	bsr	Print_Text
 
 ;	movem.l	(sp)+,d0/a0-a3
 ;	movem.l	(sp)+,a0-a3
@@ -44332,7 +44189,7 @@ show_breaks_watches:
 	bra.b	C1A59C
 
 .eop_hier:
-	bsr	C1588E
+	bsr	Print_ClearScreen
 C1A59C:
 	movem.l	(sp)+,d0/a0-a3
 skip_disassembl:
@@ -44365,7 +44222,7 @@ C1A5DA:
 	addq.w	#1,a2
 	dbra	d0,C1A5D0
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	jsr	Show_Cursor
 	move	(sp)+,(cursor_row_pos-DT,a4)
 	move	(sp)+,(Cursor_col_pos-DT,a4)
@@ -44467,26 +44324,26 @@ C1A6A0:
 
 C1A6A4:
 	movem.l	d0/a0-a3,-(sp)
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	move.b	#$43,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	#$42,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	#$50,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	#$BB,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.l	a0,a6
 	moveq	#11,d1
 C1A6D0:
 	move.b	(a0)+,d0
 	beq.b	C1A6DE
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C1A6D0
 	moveq	#0,d1
 C1A6DE:
 	moveq	#$20,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C1A6DE
 	tst.b	(a2)
 	bpl.b	C1A6F8
@@ -44504,20 +44361,20 @@ C1A6F8:
 	add	(a0),a0
 	jsr	(a0)
 	move.l	a1,d0
-	bsr	Druk_af_D0
+	bsr	Print_D0AndSpace
 	moveq	#15,d0
 	and.b	(a2),d0
 	add	d0,d0
 	lea	(ascii.MSG86,pc),a0
 	lea	(a0,d0.w),a0
 	move.b	(a0)+,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	(a0)+,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	#$20,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	#$20,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	movem.l	(sp),d0/a0-a3
 	lea	($0080,a0),a0
 	lea	($0020,a1),a1
@@ -44527,12 +44384,12 @@ C1A6F8:
 C1A750:
 	move.b	(a0)+,d0
 	beq.b	C1A75E
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C1A750
 	moveq	#0,d1
 C1A75E:
 	moveq	#$20,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C1A75E
 	tst.b	(a2)
 	bpl.b	C1A776
@@ -44550,7 +44407,7 @@ C1A776:
 	add	(a0),a0
 	jsr	(a0)
 	move.l	a1,d0
-	bsr	Druk_af_D0
+	bsr	Print_D0AndSpace
 C1A790:
 	bsr	C1529A
 	movem.l	(sp)+,d0/a0-a3
@@ -44561,18 +44418,18 @@ ascii.MSG86:
 
 show_wps:	;watchpoints afdrukken
 	movem.l	d0/a0-a3,-(sp)
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	move.l	a0,a6
 	moveq	#15,d1
 C1A7B4:
 	move.b	(a0)+,d0
 	beq.b	C1A7C2
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C1A7B4
 	moveq	#0,d1
 C1A7C2:
 	moveq	#$20,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d1,C1A7C2
 	tst.b	(a2)
 	bpl.b	C1A7DA
@@ -44590,7 +44447,7 @@ C1A7DA:
 	add	(a0),a0
 	jsr	(a0)
 	move.l	a1,d0
-	bsr	Druk_af_D0
+	bsr	Print_D0AndSpace
 	moveq	#15,d0
 	and.b	(a2),d0
 	add	d0,d0
@@ -44645,7 +44502,7 @@ C1A838:
 	move.b	(a1)+,d1
 	lsl.w	#8,d1
 	move.b	(a1)+,d1
-	jmp	(C13666).l
+	jmp	(Print_BinaryLong).l
 
 C1A84C:
 	moveq	#3,d5
@@ -44665,13 +44522,13 @@ C1A862:
 	bsr	C15908
 	move.b	(a1)+,d0
 	bsr	C15908
-	bsr	druk_af_space
+	bsr	Print_Space
 	dbra	d2,C1A862
 	rts
 
 C1A878:
 	moveq	#$22,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$27,d2
 C1A880:
 	move.b	(a1)+,d0
@@ -44682,15 +44539,15 @@ C1A880:
 	bcc.b	C1A892
 	moveq	#$2E,d0
 C1A892:
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d2,C1A880
 C1A89A:
 	moveq	#$22,d0
-	br	SENDONECHARNORMAL
+	br	Print_Char
 
 C1A8A0:
 	moveq	#$22,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	moveq	#$27,d2
 C1A8A8:
 	move.b	(a1)+,d0
@@ -44700,10 +44557,10 @@ C1A8A8:
 	bcc.b	.ok
 	moveq	#$2E,d0
 .ok:
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	dbra	d2,C1A8A8
 	moveq	#$22,d0
-	br	SENDONECHARNORMAL
+	br	Print_Char
 
 ;********************************
 ;*	  Single Step		*
@@ -44763,7 +44620,7 @@ DEBUG_OFF_2:
 	jsr	(Change_2menu_d0).l
 	move.l	(sp)+,d0
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	jsr	Show_Cursor
 	lea	(End_msg,pc),a0
 	jmp	(druk_status_en_end_af).l
@@ -44832,7 +44689,7 @@ DEBUG_JUMPTOLINE:
 	move.l	a2,a3
 	move.l	(TraceLineNr-DT,a4),(FirstLineNr-DT,a4)
 	move.l	d0,-(sp)
-	jsr	(RegTab_SETALLNOTUPD).l
+	jsr	(LineTab_SETALLNOTUPD).l
 	move.l	(sp)+,d0
 	jmp	JUMPTOLINE
 
@@ -44888,7 +44745,7 @@ DEBUG_ADD_BRKPT:
 	move	(a1),(a5)+
 	rts
 
-DEBUG_CLEAR_BP_BUFFER:
+Zap_Breakpoints:
 	lea	(BREAKPTBUFFER-DT,a4),a5
 	moveq	#MAX_BRK_PTRS-1,d5
 .lopje:
@@ -44943,7 +44800,7 @@ com_Go:
 	bne.b	.NO_ADDR
 	move.l	d0,(pcounter_base-DT,a4)
 .NO_ADDR:
-	bsr.b	DEBUG_CLEAR_BP_BUFFER
+	bsr.b	Zap_Breakpoints
 .LOOP1:
 	lea	(BREAKPOINT.MSG).l,a0
 	bsr	INPUTTEXT
@@ -45473,7 +45330,6 @@ C1B1AE:
 ;	cmp.w	#9,d0		;tracetrap
 ;	beq.s	.noclose
 ;	jsr	close_debug_win		;?!?!
-;	jsr	test_debug
 ;.noclose:
 
 	lea	(Error_msg_tab2,pc),a0
@@ -45497,7 +45353,7 @@ C1B1E4:
 C1B1EE:
 	bsr.b	C1B22A
 	add	(a0),a0
-	bsr	printthetext
+	bsr	Print_Text
 	move	d1,d0
 	bsr	C15908
 	bra.b	C1B218
@@ -45508,16 +45364,16 @@ C1B200:
 	add	d0,d0
 	add	(a0,d0.w),a0
 	bsr.b	C1B22A
-	bsr	printthetext
+	bsr	Print_Text
 	cmp.b	#2,d1
 	beq.b	C1B272
 	cmp.b	#3,d1
 	beq.b	C1B272
 C1B218:
 	lea	(Raised.MSG,pc),a0
-	bsr	printthetext
+	bsr	Print_Text
 	move.l	(pcounter_base-DT,a4),d0
-	bsr	druk_af_d0
+	bsr	Print_D0
 	bra.b	EXHA_JUSTRETURN
 
 C1B22A:
@@ -45553,7 +45409,7 @@ C1B272:
 EXHA_JUSTRETURN:
 	cmp.b	#MT_DEBUGGER,(menu_tiepe-DT,a4)
 	beq	DEBUG_NEXTLINE
-	bsr	druk_cr_nl
+	bsr	Print_NewLine
 	jsr	(LINE_REGPRINT).l
 	jmp	(CommandlineInputHandler).l
 
@@ -45628,20 +45484,20 @@ enter_hex_mode:
 	move.l	a0,(Error_Jumpback-DT,a4)
 C1B324:
 	clr.l	(LineFromTop-DT,a4)
-	jsr	(RegTab_SETALLNOTUPD).l
+	jsr	(LineTab_SETALLNOTUPD).l
 	tst.b	(MemDumpSize-DT,a4)
 	bne.b	C1B338
 	addq.b	#1,(MemDumpSize-DT,a4)
 C1B338:
 	move.l	(MEM_DIS_DUMP_PTR-DT,a4),d0
 
-	move.l	d0,(RegelPtrsIn-DT,a4)
-	bsr	SENDCHARDELSCR
+	move.l	d0,(LinePtrsIn-DT,a4)
+	bsr	Print_DelScr
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	move.b	#$FF,(B2BEB8-DT,a4)
 	moveq	#0,d0
-	jsr	(SENDONECHARNORMAL).l
+	jsr	(Print_Char).l
 
 	jsr	(StatusBar_monitor).l
 	move.l	#-1,reset_pos
@@ -45678,7 +45534,7 @@ monitor_loopje:
 ;	jsr	(StatusBar_monitor).l
 
 	bsr	RESETMENUTEXT
-	jsr	(messages_get).l
+	jsr	(IO_GetKeyMessages).l
 	jsr	(GETKEYNOPRINT).l
 	cmp.b	#$1B,d0
 	beq	LeaveMonitor
@@ -45771,15 +45627,15 @@ C1B4AA:
 	bra.w	mon_setpos
 
 mon_SyntPrefs:
-	move.b	#2,(Prefs_tiepe-DT,a4)
+	move.b	#2,(PrefsType-DT,a4)
 	bra.b	C1B4C0
 
 mon_EnvPrefs:
-	move.b	#0,(Prefs_tiepe-DT,a4)
+	move.b	#0,(PrefsType-DT,a4)
 	bra.b	C1B4C0
 
 mon_AsmPrefs:
-	move.b	#1,(Prefs_tiepe-DT,a4)
+	move.b	#1,(PrefsType-DT,a4)
 C1B4C0:
 	movem.l	d0-a6,-(sp)
 	jsr	(Handle_prefs_windows).l
@@ -45792,9 +45648,11 @@ C1B4C0:
 
 ; ----
 mon_amiguide:
+	IF	AMIGA_GUIDE
 	movem.l	d0-a6,-(sp)
 	jsr	(AmigaGuideGedoe).l
 	movem.l	(sp)+,d0-a6
+	ENDIF
 	rts
 
 ; ----
@@ -45832,7 +45690,7 @@ mon_setpos:
 drukit:
 	bclr	#MB1_REGEL_NIET_IN_SOURCE,(MyBits-DT,a4)
 
-	lea	(regel_buffer-DT,a4),a1		;status
+	lea	(line_buffer-DT,a4),a1		;status
 	move.l	a1,a2
 	lea	(a1,d7.w),a1
 
@@ -46057,7 +45915,7 @@ C1B5D2:
 DissJump2:
 	moveq	#-1,d0
 	move.l	d0,(MON_LAST_LONG_ADDR-DT,a4)
-	bsr	C1B9A2
+	bsr	DisassembleLine
 	moveq	#-1,d1
 C1B5E8:
 	move.l	(MON_LAST_LONG_ADDR-DT,a4),d0
@@ -46070,11 +45928,11 @@ MonJump2:
 	bclr	#0,d0
 	move.l	d0,a0
 	move.l	(a0),d0
-	lea	(B29B93-DT,a4),a3
+	lea	(DisassemblyBuffer-DT,a4),a3
 	jsr	(ZetHex_D0_Om5_inA3).l
 	clr.b	(a3)
-	lea	(B29B93-DT,a4),a1
-	jsr	(C14678).l
+	lea	(DisassemblyBuffer-DT,a4),a1
+	jsr	(KEYBUFFERPUTSTR).l
 	br	mon_jump2Addr
 
 C1B618:
@@ -46082,7 +45940,7 @@ C1B618:
 LeaveMonitor:
 	bsr.b	mon_getCurrAdr
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
+	bsr	Print_Char
 	bclr	#SB1_MOUSE_KLIK,(SomeBits-DT,a4)
 	lea	(ErrorInLine).l,a0
 	move.l	a0,(Error_Jumpback-DT,a4)
@@ -46094,7 +45952,7 @@ LeaveMonitor:
 	jmp	(CommandlineInputHandler).l
 
 mon_getCurrAdr:
-	lea	(RegelPtrsIn-DT,a4),a0
+	lea	(LinePtrsIn-DT,a4),a0
 	move.l	(LineFromTop-DT,a4),d0
 
 	lsl.w	#2,d0
@@ -46154,20 +46012,20 @@ C1B69C:
 	bra.b	C1B6B2
 
 C1B6A2:
-	move.l	(RegelPtrsIn-DT,a4),-(sp)
-	jsr	(RegTab_SETALLNOTUPD).l
-	move.l	(sp)+,(RegelPtrsIn-DT,a4)
+	move.l	(LinePtrsIn-DT,a4),-(sp)
+	jsr	(LineTab_SETALLNOTUPD).l
+	move.l	(sp)+,(LinePtrsIn-DT,a4)
 	rts
 
 C1B6B2:
 	move.l	d0,-(sp)
-	jsr	(RegTab_SETALLNOTUPD).l
+	jsr	(LineTab_SETALLNOTUPD).l
 	move.l	(sp)+,d0
 	cmp.l	#MON_DIS_TYPES,(MON_TYPE_PTR-DT,a4)
 	bne.b	C1B6CA
 	bclr	#0,d0
 C1B6CA:
-	move.l	d0,(RegelPtrsIn-DT,a4)
+	move.l	d0,(LinePtrsIn-DT,a4)
 	clr.l	(LineFromTop-DT,a4)
 	clr	(MON_EDIT_POSITION-DT,a4)
 	rts
@@ -46219,7 +46077,7 @@ iets_met_monitor_output:
 
 	jsr	get_font1
 
-	lea	(RegelPtrsIn-DT,a4),a6
+	lea	(LinePtrsIn-DT,a4),a6
 	move	(NrOfLinesInEditor-DT,a4),d1
 
 	bset	#MB1_REGEL_NIET_IN_SOURCE,(MyBits-DT,a4)
@@ -46342,7 +46200,7 @@ Mon_scrolldown:
 	move.w	(a7)+,(cursor_row_pos-DT,a4)
 .No_Caret2:
 
-	jsr	(Regeltab_scrolldown).l
+	jsr	(LineTab_scrolldown).l
 
 	bsr	new2old_stuff
 	bra.w	mon_setpos
@@ -46365,7 +46223,7 @@ Mon_scrollup:
 
 	jsr	Show_Cursor
 
-	jsr	(Regeltab_scrollup).l
+	jsr	(LineTab_scrollup).l
 	bsr	new2old_stuff
 	bsr.w	mon_setpos
 	moveq	#1,d0				; *** returns 1 if scrolled
@@ -46378,10 +46236,10 @@ Mon_scrollup:
 
 Mon_pageup:
 	move.l	#-1,reset_pos
-	move.l	(RegelPtrsIn-DT,a4),-(sp)
-	jsr	(RegTab_SETALLNOTUPD).l
+	move.l	(LinePtrsIn-DT,a4),-(sp)
+	jsr	(LineTab_SETALLNOTUPD).l
 
-	lea	(RegelPtrsIn-DT,a4),a0
+	lea	(LinePtrsIn-DT,a4),a0
 	move	(NrOfLinesInEditor-DT,a4),d0
 	subq.w	#1,d0
 	add	d0,d0
@@ -46394,15 +46252,15 @@ Mon_pageup:
 
 Mon_pagedown:
 	move.l	#-1,reset_pos
-	lea	(RegelPtrsIn-DT,a4),a0
+	lea	(LinePtrsIn-DT,a4),a0
 	move	(NrOfLinesInEditor-DT,a4),d0
 	subq.w	#1,d0
 	add	d0,d0
 	add	d0,d0
 	add	d0,a0
 	move.l	(a0),-(sp)
-	jsr	(RegTab_SETALLNOTUPD).l
-	move.l	(sp)+,(RegelPtrsIn-DT,a4)
+	jsr	(LineTab_SETALLNOTUPD).l
+	move.l	(sp)+,(LinePtrsIn-DT,a4)
 	bsr	new2old_stuff
 	move.w	#1,Mon_Notif_Addr
 	rts
@@ -46448,12 +46306,12 @@ Debug_base:
 	jsr	(beeldtextaf).l
 	lea	(ascii.MSG8).l,a0
 	move.l	a4,d0
-	jsr	(Druk_af_D0).l
+	jsr	(Print_D0AndSpace).l
 	lea	(ascii.MSG9).l,a0
 	jsr	(beeldtextaf).l
 	lea	(ascii.MSG8).l,a0
 	move.l	#L2DF4C,d0
-	jsr	(Druk_af_D0).l
+	jsr	(Print_D0AndSpace).l
 	lea	(ascii.MSG0).l,a0
 	jmp	(beeldtextaf).l
 
@@ -46466,40 +46324,39 @@ DissCursor:
 	
 DissKeys:
 	cmp.b	#$80,d0
-	beq.b	C1B97C
+	beq.b	DissEscKeys
 	cmp.b	#$7F,d0			; *** (DEL) Insert NOP
 	beq.b	DissInsertNOP
 	jsr	(KEYBUFFERPUTCHAR).l
-	bra.w	C1B9D0
+	bra.w	DissHandleKey
 
-C1B97C:
+DissEscKeys:
 	move.b	(edit_EscCode-DT,a4),d0
-	cmp.b	#$57,d0	'W'
-	beq.b	C1B9A0
-	bsr.b	C1B9A2
-	lea	(B29B93-DT,a4),a1
-	jsr	(C14678).l
+	cmp.b	#'W',d0
+	beq.b	.end
+	bsr.b	DisassembleLine
+	lea	(DisassemblyBuffer-DT,a4),a1
+	jsr	(KEYBUFFERPUTSTR).l
 	moveq	#6,d0
-	bsr	C17412
+	bsr	KEYBUFFERPUTESC
 	jsr	(KEY_RETURN_LAST_KEY).l
-	bra.b	C1B9D0
+	bra.b	DissHandleKey
 
-C1B9A0:
-	rts
+.end:	rts
 
-C1B9A2:
-	lea	(RegelPtrsIn-DT,a4),a0
+DisassembleLine:
+	lea	(LinePtrsIn-DT,a4),a0
 	move.l	(LineFromTop-DT,a4),d0
 
 	lsl.w	#2,d0
 	add	d0,a0
 
 	move.l	(a0)+,a5
-	jmp	(C1FE7E).l
+	jmp	(Disassemble).l
 
 ; ----
 DissInsertNOP:
-	lea	(RegelPtrsIn-DT,a4),a0
+	lea	(LinePtrsIn-DT,a4),a0
 	move.l	(LineFromTop-DT,a4),d0
 
 	lsl.w	#2,d0
@@ -46522,11 +46379,12 @@ NoDiss_Scroll:
 	move.w	(a7)+,(cursor_row_pos-DT,a4)
 	move.l	#-1,reset_pos
 	rts
-C1B9D0:
+
+DissHandleKey:
 	bsr	C1529A
 	moveq	#0,d0
-	bsr	SENDONECHARNORMAL
-	lea	(RegelPtrsIn-DT,a4),a0
+	bsr	Print_Char
+	lea	(LinePtrsIn-DT,a4),a0
 	move.l	(LineFromTop-DT,a4),d0
 
 	lsl.w	#2,d0
@@ -46541,17 +46399,17 @@ C1B9D0:
 	move.l	d0,(INSTRUCTION_ORG_PTR-DT,a4)
 	clr	(CurrentSection-DT,a4)
 	jsr	INPUTTEXT_NOTEXT
-	cmp.b	#$1B,d0
-	beq.b	C1BA16
+	cmp.b	#$1B,d0				; ESC
+	beq.b	.end
 	jsr	(Assemble_cur_line).l
 	bsr	Mon_scrollup
-	tst.b	d0					; *** Scrolled ?
-	bne.b	NoDissEnter_Scroll
+	tst.b	d0				; Scrolled ?
+	bne.b	.NoDissEnter_Scroll
 	move.l	#-1,reset_pos
 	rts
-NoDissEnter_Scroll:
+.NoDissEnter_Scroll:
 	bsr.b	NoDiss_Scroll
-C1BA16:	bra.b	NoDiss_Scroll
+.end:	bra.b	NoDiss_Scroll
 
 ;******** Diss druk line ********
 
@@ -46559,7 +46417,7 @@ DissDrukline:
 ;	move.l	a1,-(sp)
 	move.l	a5,d0
 
-	lea	(regel_buffer-DT,a4),a3
+	lea	(line_buffer-DT,a4),a3
 	move.l	a3,a1
 	jsr	(Zet_D0_Om_inA3).l
 
@@ -46803,23 +46661,23 @@ AsciiHandleEsc:
 	rts
 
 C1BC2A:
-	move.l	(RegelPtrsIn-DT,a4),-(sp)
-	jsr	(RegTab_SETALLNOTUPD).l
+	move.l	(LinePtrsIn-DT,a4),-(sp)
+	jsr	(LineTab_SETALLNOTUPD).l
 	move.l	(sp)+,d0
 	subq.l	#1,d0
-	move.l	d0,(RegelPtrsIn-DT,a4)
+	move.l	d0,(LinePtrsIn-DT,a4)
 	br	new2old_stuff
 
 C1BC40:
-	move.l	(RegelPtrsIn-DT,a4),-(sp)
-	jsr	(RegTab_SETALLNOTUPD).l
+	move.l	(LinePtrsIn-DT,a4),-(sp)
+	jsr	(LineTab_SETALLNOTUPD).l
 	move.l	(sp)+,d0
 	addq.l	#1,d0
-	move.l	d0,(RegelPtrsIn-DT,a4)
+	move.l	d0,(LinePtrsIn-DT,a4)
 	br	new2old_stuff
 
 C1BC56:
-	lea	(RegelPtrsIn-DT,a4),a0
+	lea	(LinePtrsIn-DT,a4),a0
 	move.l	(LineFromTop-DT,a4),d1
 
 	lsl.w	#2,d1
@@ -46861,7 +46719,7 @@ C1BC96:
 AsciiDrukline:
 	move.l	a5,d0
 
-	lea	(regel_buffer-DT,a4),a3
+	lea	(line_buffer-DT,a4),a3
 	move.l	a3,a1
 	jsr	(Zet_D0_Om_inA3).l
 
@@ -47024,7 +46882,7 @@ BinKeys:
 	cmp.b	#$80,d0
 	beq	BinKeysHandleEsc
 	move.l	#-1,reset_pos
-	lea	(RegelPtrsIn-DT,a4),a0
+	lea	(LinePtrsIn-DT,a4),a0
 	move.l	(LineFromTop-DT,a4),d1
 
 	lsl.w	#2,d1
@@ -47123,26 +46981,26 @@ C1BEF4:
 	rts
 
 C1BEFA:
-	move.l	(RegelPtrsIn-DT,a4),-(sp)
-	jsr	(RegTab_SETALLNOTUPD).l
+	move.l	(LinePtrsIn-DT,a4),-(sp)
+	jsr	(LineTab_SETALLNOTUPD).l
 	move.l	(sp)+,d0
 	subq.l	#1,d0
-	move.l	d0,(RegelPtrsIn-DT,a4)
+	move.l	d0,(LinePtrsIn-DT,a4)
 	br	new2old_stuff
 
 C1BF10:
-	move.l	(RegelPtrsIn-DT,a4),-(sp)
-	jsr	(RegTab_SETALLNOTUPD).l
+	move.l	(LinePtrsIn-DT,a4),-(sp)
+	jsr	(LineTab_SETALLNOTUPD).l
 	move.l	(sp)+,d0
 	addq.l	#1,d0
-	move.l	d0,(RegelPtrsIn-DT,a4)
+	move.l	d0,(LinePtrsIn-DT,a4)
 	br	new2old_stuff
 
 HexKeys:
 	cmp.b	#$80,d0
 	beq.w	C1BFA4
 	move.l	#-1,reset_pos
-	lea	(RegelPtrsIn-DT,a4),a0
+	lea	(LinePtrsIn-DT,a4),a0
 	move.l	(LineFromTop-DT,a4),d1
 
 	lsl.w	#2,d1
@@ -47281,7 +47139,7 @@ C1C056:
 BinDrukline:
 	move.l	a5,d0
 ;	lea	(DIS_PRINT_BUFFER_0-DT,a4),a3
-	lea	(regel_buffer-DT,a4),a3
+	lea	(line_buffer-DT,a4),a3
 	move.l	a3,a1
 	jsr	(Zet_D0_Om_inA3).l
 
@@ -47290,7 +47148,7 @@ BinDrukline:
 
 	move.b	#' ',(a3)+
 
-	lea	(ABCDEF.MSG).l,a2
+	lea	(HexChars.MSG).l,a2
 	moveq	#4-1,d1
 	moveq	#0,d4
 	move.b	(MemDumpSize-DT,a4),d4
@@ -47377,14 +47235,14 @@ HexDrukline:
 	move.l	a5,d0		;mem adres
 ;	lea	(DIS_PRINT_BUFFER_0-DT,a4),a3
 
-	lea	(regel_buffer-DT,a4),a3
+	lea	(line_buffer-DT,a4),a3
 	move.l	a3,a1
 	jsr	(Zet_D0_Om_inA3).l
 
 
 	move.b	#' ',(a3)+
 
-	lea	(ABCDEF.MSG).l,a2
+	lea	(HexChars.MSG).l,a2
 	moveq	#16-1,d1
 	move.b	(MemDumpSize-DT,a4),d4
 .lopje:
@@ -47474,7 +47332,7 @@ Sol_druk_line:
 	jsr	(_LVOMove,a6)
 
 	lea	(a5),a0
-;	lea	(regel_buffer-DT,a4),a0
+;	lea	(line_buffer-DT,a4),a0
 	move.w	d6,d0		;count
 	jsr	(_LVOText,a6)
 
@@ -47492,7 +47350,7 @@ Sol_druk_line:
 ;s1:
 ;	cmp	#"FF",d0	;inciFFp
 ;	BEQ.S	checkINCIFFP
-;	jmp	HandleMacroos
+;	jmp	HandleMacros
 ;
 ;checkINCIFFP:
 ;	move	(A3)+,D0
@@ -47501,7 +47359,7 @@ Sol_druk_line:
 ;	BEQ.S	IncIFFPal
 ;	cmp	#$5300!$8000,D0	;INCIFFS
 ;	BEQ.W	IncIFFStrip
-;	jmp	HandleMacroos
+;	jmp	HandleMacros
 
 ;********* INCIFF palet **********
 
@@ -47516,7 +47374,7 @@ palet12bit:	dc.w	0
 IncIFFPal:
 	lea	SourceCode-DT(A4),A1
 	JSR	OntfrutselNaam
-	JSR	MenNemeNaamEnPad
+	JSR	JoinIncAndIncdir
 
 	clr	palet12bit
 	clr	ColorOffset
@@ -47579,7 +47437,7 @@ coppercols12bit:
 	move	D3,ColorOffset
 ColorList:
 
-	MOVEM.L	d0-a6,IFFRegsBase	; ***
+	MOVEM.L	d0-a6,IFFRegsBase
 	MOVEM.L	D0/A6,-(SP)
 	JSR	OpenOldFile
 	MOVE.L	Bestand-DT(a4),D1
@@ -47587,7 +47445,7 @@ ColorList:
 	MOVE.L	A1,D2
 	MOVE.L	#$2000,D3		;8 kb
 	MOVE.L	DosBase-DT(a4),A6
-	JSR	(_LVORead,A6)		; ***
+	JSR	(_LVORead,A6)
 	MOVEM.L	(SP)+,D0/A6
 	LEA	ParameterBlok-DT(a4),A1
 	move	#($2000/2-1)-2,D6
@@ -47600,7 +47458,7 @@ SearchColMap:
 	BRA	ErrorOpenIFF
 
 errorinsyntax:
-	jmp	HandleMacroos
+	jmp	HandleMacros
 
 ;************ INCIFF PALET **********
 
@@ -47832,7 +47690,7 @@ CloseIFFBestand:
 	MOVE.L	DosBase-DT(a4),A6
 	JSR	(_LVOClose,A6)
 
-;	jsr	close_bestand
+;	jsr	IO_CloseFile
 
 	MOVE.L	FileLength-DT(a4),D0
 	ADD.L	D0,INSTRUCTION_ORG_PTR-DT(A4)
@@ -47848,7 +47706,7 @@ ErrorOpenIFF:
 IncIFFStrip:
 	lea	SourceCode-DT(A4),A1
 	JSR	OntfrutselNaam
-	JSR	MenNemeNaamEnPad
+	JSR	JoinIncAndIncdir
 	
 	MOVEM.L	d0-a6,IFFRegsBase
 
@@ -47941,7 +47799,7 @@ OpenLoginWindow:
 
 	cmp.l	#$7fff,d0
 	blo.s	.noprobs3
-	move.l	#$7fff,d0	;32mb is max (nu nog)
+	move.l	#$7fff,d0		; 32mb is max (nu nog)
 .noprobs3:
 	move.l	d0,_pubmax
 
@@ -47951,7 +47809,7 @@ OpenLoginWindow:
 	lsr.l	#2,d0
 	cmp.l	#$7fff,d0
 	blo.s	.noprobs2
-	move.l	#$7fff,d0	;32mb is max (nu nog)
+	move.l	#$7fff,d0		; 32mb is max (nu nog)
 .noprobs2:
 	move.l	d0,_absmax
 
@@ -47968,12 +47826,12 @@ OpenLoginWindow:
 	lsr.l	#2,d0
 	cmp.l	#$7fff,d0
 	blo.s	.noprobs
-	move.l	#$7fff,d0	;32mb is max (nu nog)
+	move.l	#$7fff,d0		; 32mb is max (nu nog)
 .noprobs:
 	move.l	#_memorytypeLabels,LoginGTags+4
 	move.l	d0,_fastmax
 	move.l	d0,_fastmemTags+4
-	bne.b	.NoFastMem			; Check for fast mem
+	bne.b	.NoFastMem		; Check for fast mem
 	move.l	#2,_memtype
 	move.l	_chipmax,_memamount
 	move.l	#_memorytypeLabelsNoFast,LoginGTags+4
@@ -48034,22 +47892,22 @@ OpenLoginWindow:
 	bne.s	li_erroropenwin
 li_waitbeforclose:
 	move.l	DosBase,a6
-	moveq.l	#4,d1		;delay
-	jsr	(_LVODelay,a6)		; ***
+	moveq.l	#4,d1			; delay
+	jsr	(_LVODelay,a6)
 
 	move.l 	GadToolsBase,a6
 	move.l	LoginWnd(pc),a0
 	move.l	86(a0),a0
-	jsr	_LVOGT_GetIMsg(a6)	;getmsg
+	jsr	_LVOGT_GetIMsg(a6)	; getmsg
 	move.l	d0,message
 	beq.s	li_nointuiactivity
-	bsr	li_checkmenu	;check if menu selected
+	bsr	li_checkmenu		; check if menu selected
 
-	tst.w	d0		;leave now !!!
+	tst.w	d0			; leave now !!!
 	bne.s	li_exit
 	
 li_nointuiactivity:
-	btst	#7,$bfe001			; WHAT'S THAT !!!
+	btst	#7,$bfe001		; WHAT'S THAT !!!
 	bne.s	li_waitbeforclose
 li_exit:
 
@@ -48078,7 +47936,7 @@ li_erroropenwin
 
 depth:	dc.b	0
 
-	cnop	0,4
+	even
 message:	ds.l	1
 class:		dc.l	0
 code:		dc.w	0
@@ -48108,12 +47966,12 @@ memstuff2:
 li_checkmenu:
 	clr.l	class
 	clr.l	code
-	move.l	d0,a0		;msg ptr
+	move.l	d0,a0			; msg ptr
 	moveq.l	#0,d1
 	moveq.l	#0,d2
 	moveq.l	#0,d3
-	move.l	20(a0),d1	;class
-	move.w	24(a0),d2	;code
+	move.l	im_Class(a0),d1
+	move.w	im_Code(a0),d2
 	move.l	a0,a5
 	
 	move.l	d1,class
@@ -48121,7 +47979,7 @@ li_checkmenu:
 
 	move.l 	GadToolsBase,a6
 	move.l	message(pc),a1
-	jsr	_LVOGT_ReplyIMsg(a6)	;replyImsg
+	jsr	_LVOGT_ReplyIMsg(a6)
 
 	moveq.l	#0,d0
 	move.l	message(pc),a1
@@ -48129,8 +47987,8 @@ li_checkmenu:
 	move.l	class,d1
 	and.l	#$20!$40,d1
 	beq.w	nobutton
-	move.l	28(a1),a1		;IAdress (voor gadget ID)
-	move.w	38(a1),gadgetnr		;gadgetID
+	move.l	im_IAddress(a1),a1
+	move.w	gg_GadgetID(a1),gadgetnr
 
 	cmp.w   #GD__memorytype,gadgetnr
 	bne.w	.nextbutton1
@@ -48190,7 +48048,7 @@ geenkey:
 noexit:	rts
 
 wel_exit:
-	moveq.l	#1,d0			;exit please
+	moveq.l	#1,d0			; exit please
 	rts
 
 SelectMemTable:
@@ -48421,20 +48279,20 @@ _standard_dirText:
 
 _okayText:
     DC.B    '_OK',0
-
     CNOP    0,2
 
-_memorytypeLabels:	dc.l	_memorytypeLab0
-			dc.l	_memorytypeLab1
-			dc.l	_memorytypeLab2
-			dc.l	_memorytypeLab3
-			dc.l	0
+_memorytypeLabels:
+	dc.l	_memorytypeLab0
+	dc.l	_memorytypeLab1
+	dc.l	_memorytypeLab2
+	dc.l	_memorytypeLab3
+	dc.l	0
 
 _memorytypeLabelsNoFast:
-			dc.l	_memorytypeLab0
-			dc.l	_memorytypeLab2
-			dc.l	_memorytypeLab3
-			dc.l	0
+	dc.l	_memorytypeLab0
+	dc.l	_memorytypeLab2
+	dc.l	_memorytypeLab3
+	dc.l	0
 
 _memorytypeLab0:	dc.b	'_Chipmem',0
 _memorytypeLab1:	dc.b	'_Fastmem',0
@@ -48877,7 +48735,7 @@ IllegalPath.MSG:	dc.b	'Illegal Path ',0
 IllegalDevice.MSG:	dc.b	'Illegal Device',0
 WriteProtecte.MSG:	dc.b	'Write Protected',0
 Nodiskindrive.MSG:	dc.b	'No disk in drive',0
-Illegaloption.MSG:	dc.b	'Illegal option !!',0
+Illegaloption.MSG:	dc.b	'Illegal option!!!!!!!!!!!!!!!',0
 REMwithoutERE.MSG:	dc.b	'REM without EREM',0
 TEXTwithoutET.MSG:	dc.b	'TEXT without ETEXT',0
 Illegalscales.MSG:	dc.b	'Illegal scale size',0
@@ -48885,12 +48743,12 @@ Offsetwidthex.MSG:	dc.b	'{Offset/width} expected',0
 Missingbrace.MSG:	dc.b	'Missing brace',0
 Colonexpected.MSG:	dc.b	'Colon expected',0
 Missingbracke.MSG:	dc.b	'Missing bracket',0
-FPUneededforo.MSG:	dc.b	'FPU needed for operation !!',0
+FPUneededforo.MSG:	dc.b	'FPU needed for operation!!!!!!!!!!!!!!!!',0
 Tomanywatchpo.MSG:	dc.b	'To many watchpoints (max 8.)',0
-Illegalsource.MSG:	dc.b	'Illegal source, not activated !!',0
+Illegalsource.MSG:	dc.b	'Illegal source, not activated!!!!!!!!!!!!!',0
 Novalidmemory.MSG:	dc.b	'No valid memory directory present',0
 Autocommandov.MSG:	dc.b	'Auto command overflow (256 chars)',0
-Endshouldbehi.MSG:	dc.b	'End should be higher than start !',0
+Endshouldbehi.MSG:	dc.b	'End should be higher than start!!!',0
 Warningvalues.MSG:	dc.b	'Warning, value signed extended to longword',0
 Illegalsource.MSG0:	dc.b	'Illegal source nr',0
 Includingempt.MSG:	dc.b	'Including empty source ?',0
@@ -50255,7 +50113,7 @@ setup_int_stuff:
 	jsr	GetTheTime		; init tijd en datumstring's
 
 	movem.l	d0-a6,-(sp)
-	jsr	(C1190C).l
+	jsr	(CreateMenus).l
 	move.l	(Comm_menubase-DT,a4),d0
 	move.b	#MT_COMMAND,(menu_tiepe-DT,a4)
 	bsr	Change_2menu_d0
@@ -50275,7 +50133,7 @@ Breakdown_intstuff:
 .nodir:
 
 	jsr	(CloseDevice).l
-	jsr	(C11964).l
+	jsr	(DestroyMenus).l
 	bsr	closewindow
 	bsr	closescreen
 
@@ -50285,6 +50143,12 @@ Breakdown_intstuff:
 	bsr	closereqlib
 	bsr	closegadtlib
 	bsr	closeasllib
+	bsr	closedislib
+
+	IF	CLIPBOARD
+	jsr	Clip_Cleanup
+	ENDIF
+
 	bra	closegfxlib
 
 closewb:
@@ -50301,12 +50165,12 @@ C1DE6E:
 
 ChangeSource:
 	moveq	#0,d0
-	jsr	(SENDONECHARNORMAL).l
+	jsr	(Print_Char).l
 	clr	(Cursor_col_pos-DT,a4)
 	clr	(cursor_row_pos-DT,a4)
-	jsr	(SENDONECHARNORMAL).l
+	jsr	(Print_Char).l
 	jsr	(CloseDevice).l
-	jsr	(C11964).l
+	jsr	(DestroyMenus).l
 	bsr	closewindow
 	bsr	closescreen
 	move.b	(CurrentSource-DT,a4),d0
@@ -50315,7 +50179,7 @@ ChangeSource:
 	bsr	openscreen
 	bsr	openwindow
 	movem.l	d0-d7/a0-a6,-(sp)
-	jsr	(C1190C).l
+	jsr	(CreateMenus).l
 	moveq	#0,d0
 	move.b	(menu_tiepe-DT,a4),d0
 	lea	(Comm_menubase-DT,a4),a0
@@ -50334,7 +50198,7 @@ ReinitStuff:
 ;	and.b	#1,PR_OnePlane
 
 	jsr	(CloseDevice).l
-	jsr	(C11964).l
+	jsr	(DestroyMenus).l
 	bsr	closewindow
 	bsr	closescreen
 
@@ -50344,7 +50208,7 @@ ReinitStuff:
 	bsr	openscreen
 	bsr	openwindow
 	movem.l	d0-d7/a0-a6,-(sp)
-	jsr	(C1190C).l
+	jsr	(CreateMenus).l
 	moveq	#0,d0
 	move.b	(menu_tiepe-DT,a4),d0
 	lea	(Comm_menubase-DT,a4),a0
@@ -50383,7 +50247,7 @@ closegadtlib:
 	move.l	(4).w,a6
 	move.l	(GadToolsBase-DT,a4),a1
 	cmp.l	#0,a1
-	beq.b	C1DF8A
+	beq.w	C1DF8A
 	clr.l	(GadToolsBase-DT,a4)
 	jmp	(_LVOCloseLibrary,a6)
 
@@ -50402,6 +50266,46 @@ closeasllib:
 	clr.l	(AslBase-DT,a4)
 	jmp	(_LVOCloseLibrary,a6)
 
+openifflib:
+	IF	CLIPBOARD
+	move.l	(4).w,a6
+	lea	IFFParseName,a1
+	jsr	(_LVOOldOpenLibrary,a6)
+	move.l	d0,(IFFParseBase-DT,a4)
+	ENDIF
+	rts
+
+closeifflib:
+	IF	CLIPBOARD
+	move.l	(4).w,a6
+	move.l	(IFFParseBase-DT,a4),a1
+	cmp.l	#0,a1
+	beq.b	C1DF8A
+	clr.l	(IFFParseBase-DT,a4)
+	jmp	(_LVOCloseLibrary,a6)
+	ENDIF
+	rts
+
+opendislib:
+	IF	DISLIB
+	move.l	(4).w,a6
+	lea	DislibName,a1
+	jsr	(_LVOOldOpenLibrary,a6)
+	move.l	d0,(DislibBase-DT,a4)
+	ENDIF
+	rts
+
+closedislib:
+	IF	DISLIB
+	move.l	(4).w,a6
+	move.l	(DislibBase-DT,a4),a1
+	cmp.l	#0,a1
+	beq.b	C1DF8A
+	clr.l	(DislibBase-DT,a4)
+	jmp	(_LVOCloseLibrary,a6)
+	ENDIF
+	rts
+
 C1DF8A:
 	rts
 
@@ -50417,7 +50321,6 @@ openscreen:
 ;	moveq.l	#0,d0
 ;	move.l	DiepteScherm(pc),d0
 ;	move.l	SchermMode,d1
-;	jsr	test_debug
 
 	cmp.l	#-1,SchermMode
 	beq.s	.openscrreq
@@ -50513,13 +50416,13 @@ openscreen:
 	jsr	(SetScreenColors).l
 	jsr	(GetScreenColors).l
 	move.b	#1,(ColorsSetBits-DT,a4)
-	bra.b	C1E114
+	bra.w	C1E114
 
 C1E100:
-	cmp.b	#1,(ColorsSetBits-DT,a4)
-	beq.b	C1E114
-	jsr	(GetScreenColors).l
-	move.b	#1,(ColorsSetBits-DT,a4)
+;	cmp.b	#1,(ColorsSetBits-DT,a4)	; use my colors by default ;)
+;	beq.b	C1E114
+;	jsr	(GetScreenColors).l
+;	move.b	#1,(ColorsSetBits-DT,a4)
 C1E114:
 	jsr	(SetScreenColors).l
 	move.l	(ScreenBase).l,a0
@@ -50804,8 +50707,8 @@ OpenPrinterForOutput:
 
 C1E2F0:
 	move.b	(CurrentSource-DT,a4),d0
-	jsr	(C141CE).l
-	jsr	(C142A4).l
+	jsr	(SetTitle_Source).l
+	jsr	(CheckUnsaved).l
 	movem.l	d0-d7/a0-a6,-(sp)
 	lea	(SourcePtrs-DT,a4),a0
 	moveq	#9,d7
@@ -50823,9 +50726,9 @@ C1E320:
 	sub.l	a1,d0
 	lsr.l	#8,d0
 	move.b	d0,(B30174-DT,a4)
-	jsr	(C141CE).l
+	jsr	(SetTitle_Source).l
 	movem.l	d0-d7/a0-a6,-(sp)
-	jsr	(C1430E).l
+	jsr	(QuerySave).l
 	movem.l	(sp)+,d0-d7/a0-a6
 	lea	(CS_size,a0),a0
 	dbra	d7,C1E30A
@@ -50858,14 +50761,14 @@ C1E388:
 
 C1E392:
 	bsr	C1E2F0
-	jsr	(C1432A).l
+	jsr	(QueryExit).l
 Restart_Entrypoint:
 	move	d0,-(sp)
 	jsr	(C17AF0).l
 	jsr	(C182BE).l
 	bsr.b	FreeSources
 	move.b	#'0',(SourceNrInBalk).l
-	move.b	#'0',(B1F237).l
+	move.b	#'0',(SourceNumber.MSG).l
 	move.b	#0,(MenuFileName).l
 	move.b	#0,(CurrentSource-DT,a4)
 	move.b	#0,(LastFileNaam-DT,a4)
@@ -50875,13 +50778,13 @@ Restart_Entrypoint:
 	sub.l	a1,d0
 	move.l	(4).w,a6
 	jsr	(_LVOFreeMem,a6)
-	jsr	(ZapIncludes).l
-	jsr	(C2994).l
+	jsr	(Zap_Includes).l
+	jsr	(Zap_Sections).l
 	move	(sp)+,d0
 	cmp.b	#'R',d0
 	bne.b	close_PrinterBase
 	move.l	(DATA_USERSTACKPTR-DT,a4),sp
-	jmp	(C40E).l
+	jmp	(Initialize_FromRestart).l
 
 close_PrinterBase:
 	bsr	Breakdown_intstuff
@@ -50994,16 +50897,17 @@ C1E574:
 	move.l	a0,(LabelEnd-DT,a4)
 
 
-	jsr	(C141C8).l
-	jsr	(C14232).l
+	;jsr	(C141C8).l
+	jsr	(CheckUnsaved).l
+	jsr	(SetupNewSourceBuffer).l
 	bsr.b	C1E5FA
 	jmp	(PRIVILIGE_VIOL1).l
 
 C1E5B6:
 	lea	(ADD.MSG,pc),a0
-	jsr	(printthetext).l
+	jsr	(Print_Text).l
 	moveq	#$3F,d0
-	jsr	(SENDONECHARNORMAL).l
+	jsr	(Print_Char).l
 	jsr	(Druk_MsgAf_GetNumbr).l
 	bne.b	C1E5F4
 	asl.l	#8,d0
@@ -51142,7 +51046,7 @@ IetsMetScreenHight:
 ;	move.w	d0,(Edit_nrlines-DT,a4)
 
 	move	d1,d0
-	add.w	d0,d0				; ***
+	add.w	d0,d0
 	move	d0,(Max_Hoogte-DT,a4)
 	rts
 
@@ -51167,6 +51071,12 @@ GadtoolsName:
 	dc.b	'gadtools.library',0
 AslName2:
 	dc.b	'asl.library',0
+IFFParseName:
+	dc.b	'iffparse.library',0
+	even
+DislibName:
+	dc.b	'disassembler.library',0
+	even
 
 WB:	DC.B    'Workbench',0
 	even
@@ -51270,7 +51180,7 @@ andreplaceitw.MSG:
 _Replace_Abor.MSG:
 	dc.b	'_Replace|_Abort',0
 Founditshould.MSG:
-	dc.b	'Found it !, should it be replaced ?',0	; ***
+	dc.b	'Found it!!, should it be replaced??',0
 _Yes_No_Last_.MSG:
 	dc.b	'_Yes|_No|_Last|_Global|_Abort',0
 Jumptowhichli.MSG:
@@ -51281,7 +51191,7 @@ Selectcolours.MSG:
 	dc.b	"TRASH'M-Pro "
 	version
 	dc.b	' Amiga guide handler',0
-	dc.b	'Help amigaguide already active',0	; ***
+	dc.b	'Help amigaguide already active',0
 amigaguidelib.MSG:
 	dc.b	'amigaguide.library',0
 sAGAGuide.MSG:
@@ -51413,7 +51323,7 @@ openreqtoolslib:
 	tst.l	(MainWindowHandle-DT,a4)
 	beq.b	C1EC7A
 	lea	(Reqtoolslibra.MSG0).l,a0
-	jmp	(printthetext).l
+	jmp	(Print_Text).l
 
 C1EC7A:
 	rts
@@ -51456,7 +51366,6 @@ fontrequester:
 
 ;	lea	editfont_name,a0
 ;	move.w	EditorFontSize,d0
-;	jsr	test_debug
 
 	lea	fonttags(pc),a0
 	move.l	ScreenBase,0+4(a0)
@@ -51636,7 +51545,7 @@ YesReqLib:
 	tst.l	(ReqToolsbase-DT,a4)
 	bne	ReqLibIsOpen
 	bclr	#0,(PR_ReqLib).l
-	jmp	(FileReqStuff).l
+	jmp	(ShowFileReq).l
 
 IO_msgptrs:
 	dc.w	Readsource.MSG-*	0
@@ -51745,7 +51654,7 @@ AslLibIsOpen:
 	bra.b	GetTheFile
 
 .noreq:
-	jmp	FileReqStuff
+	jmp	ShowFileReq
 
 
 .filetags:
@@ -52043,21 +51952,21 @@ req_file_extentie:
 Pref.MSG:	dc.b	'#?.Pref',0
 ProjExt.MSG:	dc.b	'#?.Aprj',0
 
-C1F030:
+ShowOverwriteReq:
 	lea	(Fileallreadye.MSG).l,a1
 	lea	(_Overwrite_Le.MSG).l,a2
 	move.l	#0,(RequesterType).l
 	bra.b	ShowReqtoolsRequester
 
-C1F048:
+ShowSaveReq:
 	lea	(Source.MSG).l,a1
 	lea	(_Save_Continu.MSG).l,a2
 	move.l	#2,(RequesterType).l
 	bra.b	ShowReqtoolsRequester
 
-C1F060:
+ShowYesNoReq:
 	lea	(Areyousure.MSG).l,a1
-	lea	(_ok_no.MSG).l,a2
+	lea	(_Yes_No.MSG).l,a2
 	move.l	#2,(RequesterType).l
 ShowReqtoolsRequester:
 	move.l	(ReqToolsbase-DT,a4),a6
@@ -52101,7 +52010,7 @@ C1F0BA:
 C1F0D2:
 	movem.l	d0-d7/a0-a6,-(sp)
 	move.b	(B30174-DT,a4),d0
-	jsr	(C2BAE).l
+	jsr	(Go2Sourcebuf).l
 	jsr	(C188B2).l
 	movem.l	(sp)+,d0-d7/a0-a6
 	moveq	#"Y",d0
@@ -52111,7 +52020,7 @@ NotInCommandline:
 	moveq	#"Y",d0
 	rts
 
-C1F13A:
+ShowExitReq:
 	move.l	(ReqToolsbase-DT,a4),a6
 	movem.l	a0-a4,-(sp)
 	lea	(AbouttoexitAS.MSG).l,a1
@@ -52161,8 +52070,9 @@ Fileallreadye.MSG:
 	dc.b	'    Are you sure?',0
 Source.MSG:
 	dc.b	'Source '
-B1F237: dc.b	'0 » '
-B1F23B:
+SourceNumber.MSG:
+	dc.b	'0 » '
+SourceNameBuffer:
 	dcb.b	$0000001F,0
 	dc.b	10
 	dc.b	'not saved yet!',$A
@@ -52171,7 +52081,7 @@ _Yes_Restart_.MSG:	dc.b	'_Yes|_Restart|_No',0
 _Save_Continu.MSG:	dc.b	'_Save|_Continue|_Abort',0
 _Overwrite_Le.MSG:	dc.b	'_Overwrite|_Leave',0
 _Ok_Ok.MSG:		dc.b	'_Ok|_Ok',0
-_ok_no.MSG:		dc.b	'_Yes|_No',0
+_Yes_No.MSG:		dc.b	'_Yes|_No',0
 
 TRASH_abouttxt.MSG:
 	dc.b	'          »» TRAS''M-Pro '
@@ -52181,6 +52091,7 @@ TRASH_abouttxt.MSG:
 	dc.b	'            copyright (c) 2021',$a
 	dc.b	'       send idea''s / bug report to:',$a
 	dc.b	'           EMAILBEN145@gmail.com',$a,$a
+TRASH_TEXT:
 	dc.b	'"a program worth using is worth trashing!"',0
 
 Newsourcenona.MSG:
@@ -54449,6 +54360,8 @@ F10.MSG:	dc.b	'F10:                                    ',0
 
 	cnop	0,4
 
+	IF	AMIGA_GUIDE
+	
 AmigaGuideGedoe:
 	lea	(amigaguidelib.MSG).l,a1
 	move.l	(4).w,a6
@@ -54473,12 +54386,12 @@ AmigaGuideGedoe:
 	move.l	(AmigaGuideBase-DT,a4),a6
 	lea	NewAmiGuide,a0
 	sub.l	a1,a1			;tagitems
-	jsr	(_LVOOpenAmigaGuideA,a6)	; ***
+	jsr	(_LVOOpenAmigaGuideA,a6)
 	move.l	d0,(NewAmiGuideBase-DT,a4)
 	beq.s	.erroropenfile
 	
 	move.l	(NewAmiGuideBase-DT,a4),a0
-	jsr	(_LVOCloseAmigaGuide,a6)	; ***
+	jsr	(_LVOCloseAmigaGuide,a6)
 	bra.b	CloseAmigaGuideLib
 
 .erroropenlib:
@@ -54507,12 +54420,13 @@ olddirlock:	dc.l	0
 
 
 W289AE:
+	ENDIF	; AMIGA_GUIDE
+
 
 	even
 realend4:
 ;	cnop	0,4
 	dc.w	666
-
 
 
 ;*************************************************
@@ -54540,7 +54454,7 @@ Handle_prefs_windows:
 
 	clr	(PrefsGedoe-DT,a4)
 
-	tst.b	(Prefs_tiepe-DT,a4)
+	tst.b	(PrefsType-DT,a4)
 	bne.b	.asmprefs0
 	bsr	Prefs_initenvGads
 	
@@ -54554,13 +54468,13 @@ Handle_prefs_windows:
 .asmprefs0:
 	bsr	Prefs_initasmGads
 .envprefs0:
-	cmp.b	#0,(Prefs_tiepe-DT,a4)
+	cmp.b	#0,(PrefsType-DT,a4)
 	bne.b	.asmprefs
 	bsr	Open_Prefswindow
 	bra.b	.envprefs
 
 .asmprefs:
-	cmp.b	#1,(Prefs_tiepe-DT,a4)
+	cmp.b	#1,(PrefsType-DT,a4)
 	bne.b	.syntcolsprefs
 	bsr	Open_Prefswindow2
 	bra.b	.envprefs
@@ -54661,11 +54575,11 @@ Prefs_CheckoutMsg:
 	bne.b	C23E5A
 	move.l	(PrefsAsmWinBase).l,a0
 	move.l	(GadToolsBase-DT,a4),a6
-	jsr	(_LVOGT_BeginRefresh,a6)	; ***
+	jsr	(_LVOGT_BeginRefresh,a6)
 	move.l	(PrefsAsmWinBase).l,a0
 	moveq.l	#1,d0
 	move.l	(GadToolsBase-DT,a4),a6
-	jmp	(_LVOGT_EndRefresh,a6)		; ***
+	jmp	(_LVOGT_EndRefresh,a6)
 ;	bra.b	C23EA0
 
 C23E5A:
@@ -54677,13 +54591,13 @@ C23E5A:
 C23E6A:
 	cmp.l	#$00000040,($0014,a0)	;class gadgets
 	bne.b	C23E88
-	cmp.b	#0,(Prefs_tiepe-DT,a4)
+	cmp.b	#0,(PrefsType-DT,a4)
 	bne.b	.geenenv
 	bsr	Prefs_checkbuttons_Env
 	bra.b	.verder
 
 .geenenv:
-	cmp.b	#1,(Prefs_tiepe-DT,a4)
+	cmp.b	#1,(PrefsType-DT,a4)
 	bne.b	.geenasm
 	bsr	Prefs_checkbuttons_Asm
 	bra.b	.verder
@@ -54851,7 +54765,7 @@ PR_savePrefs:
 	tst.b	(CurrentAsmLine-DT,a4)
 	beq.b	C240A8
 	bsr	Copy_prefsFromBuffer
-	cmp.b	#0,(Prefs_tiepe-DT,a4)
+	cmp.b	#0,(PrefsType-DT,a4)
 	bne.b	C2407A
 	bsr	C23EBA
 C2407A:
@@ -54860,7 +54774,7 @@ C2407A:
 	move.b	#1,(Safety-DT,a4)
 	move	(SomeBits3-DT,a4),-(sp)
 	bset	#SB3_EDITORMODE,(SomeBits3-DT,a4)		;in editor
-	jsr	(Write_Prefs).l
+	jsr	(com_WritePrefs).l
 	move	(sp)+,(SomeBits3-DT,a4)
 	move	(sp)+,(Safety-DT,a4)
 	move.b	#0,(B30042-DT,a4)
@@ -54900,7 +54814,7 @@ C24108:
 	jsr	(printTextInMenuStrip).l
 C24134:
 	bsr	Prefs_initenvGads
-	cmp.b	#0,(Prefs_tiepe-DT,a4)
+	cmp.b	#0,(PrefsType-DT,a4)
 	beq.b	C2414E
 	bsr	Open_Prefswindow2
 	bra.b	C24152
@@ -55140,7 +55054,7 @@ Screenmoderequester:
 	moveq.l	#3,d0
 	sub.l	a0,a0
 	move.l	(ReqToolsbase).l,a6
-	jsr	(_LVOrtAllocRequestA,a6)		; ***
+	jsr	(_LVOrtAllocRequestA,a6)
 	move.l	d0,(screen_req-DT,a4)
 	beq.b	C242CA
 
@@ -55152,7 +55066,7 @@ Screenmoderequester:
 	sub.l	a2,a2
 	move.l	(screen_req-DT,a4),a1
 	move.l	(ReqToolsbase).l,a6
-	jsr	(_LVOrtScreenModeRequestA,a6)		; ***
+	jsr	(_LVOrtScreenModeRequestA,a6)
 	tst.l	d0
 	beq	.noChange
 
@@ -55206,7 +55120,7 @@ Screenmoderequester:
 .noChange:
 	move.l	(screen_req).l,a1
 	move.l	(ReqToolsbase).l,a6
-	jsr	(_LVOrtFreeRequest,a6)		; ***
+	jsr	(_LVOrtFreeRequest,a6)
 	rts
 
 PW_envB_Cancel:
@@ -55239,7 +55153,7 @@ NoFntChange:
 
 PW_envB_Use:
 	bsr	Copy_prefsFromBuffer
-	cmp.b	#0,(Prefs_tiepe-DT,a4)
+	cmp.b	#0,(PrefsType-DT,a4)
 	bne.b	.asmprefs
 	bsr	C23EBA
 	move.l	(old_sizeX-DT,a4),d0
@@ -55259,7 +55173,7 @@ PW_envB_Use:
 	bra.b	.klaar
 
 .asmprefs:
-	cmp.b	#1,(Prefs_tiepe-DT,a4)
+	cmp.b	#1,(PrefsType-DT,a4)
 	bne.b	.syntprefs
 
 	move	(Prefs_AsmCpuType).l,(CPU_type-DT,a4)
@@ -55290,7 +55204,7 @@ SyntUseGedoe:
 
 PW_envB_Save:
 	bsr	Copy_prefsFromBuffer
-	cmp.b	#0,(Prefs_tiepe-DT,a4)
+	cmp.b	#0,(PrefsType-DT,a4)
 	bne	.asmprefs
 	bsr	C23EBA
 	move.l	(old_sizeX-DT,a4),d0
@@ -55310,7 +55224,7 @@ PW_envB_Save:
 	bra.b	.notChanged
 
 .asmprefs:
-	cmp.b	#1,(Prefs_tiepe-DT,a4)
+	cmp.b	#1,(PrefsType-DT,a4)
 	bne.b	.syntprefs
 	move	(Prefs_AsmCpuType).l,(CPU_type-DT,a4)
 	bra.b	.notChanged
@@ -55323,7 +55237,7 @@ PW_envB_Save:
 	move	(SomeBits3-DT,a4),-(sp)
 	move.b	#1,(Safety-DT,a4)
 	bset	#SB3_EDITORMODE,(SomeBits3-DT,a4)	;in editor
-	jsr	(Write_Prefs).l
+	jsr	(com_WritePrefs).l
 	move	(sp)+,(SomeBits3-DT,a4)
 	move	(sp)+,(Safety-DT,a4)
 	lea	(ENVARCTRASHp.MSG0).l,a0
@@ -55404,7 +55318,7 @@ C2462C:
 	lea	(GadgetBuffer).l,a1
 	move.l	a5,a2
 	move.l	(GadToolsBase-DT,a4),a6
-	jsr	(_LVOCreateGadgetA,a6)		; ***
+	jsr	(_LVOCreateGadgetA,a6)
 	tst.l	d0
 	beq	C24794
 	move.l	d0,a3
@@ -55439,7 +55353,7 @@ C246B8:
 	lea	(Prefs_newmenustr).l,a0
 	lea	(prefs_menutags2).l,a1
 	move.l	(GadToolsBase-DT,a4),a6
-	jsr	(_LVOCreateMenusA,a6)		; ***
+	jsr	(_LVOCreateMenusA,a6)
 	move.l	d0,(L2F056).l
 	tst.l	d0
 	beq.b	C24742
@@ -55447,7 +55361,7 @@ C246B8:
 	move.l	(MainVisualInfo).l,a1
 	lea	(prefs_menutags1).l,a2
 	move.l	(GadToolsBase-DT,a4),a6
-	jsr	(_LVOLayoutMenusA,a6)		; ***
+	jsr	(_LVOLayoutMenusA,a6)
 C24742:
 	move.l	#TRASHEnviron.MSG,Prefs_wintitle
 	sub.l	a0,a0
@@ -55464,9 +55378,7 @@ C24742:
 	move.l	(PrefsAsmWinBase).l,a0
 	sub.l	a1,a1
 	move.l	(GadToolsBase-DT,a4),a6
-	jsr	(_LVOGT_RefreshWindow,a6)		; ***
-
-	bsr	ProjectPrefswinRender
+	jsr	(_LVOGT_RefreshWindow,a6)
 
 	moveq	#0,d0
 C24782:
@@ -55504,7 +55416,7 @@ Close_Prefswindow:
 	cmp.l	#0,a0
 	beq.b	.C247EC
 	move.l	(GadToolsBase-DT,a4),a6
-	jsr	(_LVOFreeMenus,a6)			; ***
+	jsr	(_LVOFreeMenus,a6)
 .C247EC:
 	move.l	(PrefsAsmWinBase).l,a0
 	cmp.l	#0,a0
@@ -55516,7 +55428,7 @@ C24802:
 	cmp.l	#0,a0
 	beq.b	C24818
 	move.l	(GadToolsBase-DT,a4),a6
-	jsr	(_LVOFreeGadgets,a6)			; ***
+	jsr	(_LVOFreeGadgets,a6)
 C24818:
 	movem.l	(sp)+,d0/d1/a0-a2/a6
 	rts
@@ -55540,7 +55452,7 @@ Open_Prefswindow2:
 	add.b	($0023,a0),d3	;wbortop
 	lea	(Prefs_GList).l,a0
 	move.l	(GadToolsBase-DT,a4),a6
-	jsr	(_LVOCreateContext,a6)		; ***
+	jsr	(_LVOCreateContext,a6)
 	move.l	d0,a3
 	tst.l	d0
 	beq	.ProjectPrefsCError
@@ -55639,8 +55551,6 @@ Open_Prefswindow2:
 	move.l	(GadToolsBase-DT,a4),a6
 	jsr	_LVOGT_RefreshWindow(a6)
 
-	bsr	ProjectPrefswinRender
-
 	moveq	#0,d0
 .ProjectPrefswinDone:
 	movem.l	(sp)+,d1-d4/a0-a3/a5/a6
@@ -55658,40 +55568,6 @@ Open_Prefswindow2:
 	movem.w	(sp)+,d2/d3
 	moveq	#1,d0
 	bra.b	.ProjectPrefswinDone
-
-ProjectPrefswinRender:
-	movem.l d0-d5/a0-a2/a6,-(sp)
-	move.l	(PrefsAsmWinBase).l,a0
-
-	move.l  MainVisualInfo,NR+4
-	move.l  GadToolsBase,a6
-	
-	move.l  (PrefsAsmWinBase).l,a0
-
-	moveq.l	#0,d0
-	move.b	54(a0),d0
-	add.b	56(a0),d0
-	move.w	8(a0),d2	;br
-	sub.w	d0,d2
-
-	moveq.l	#0,d0
-	move.b	55(a0),d0
-	add.b	57(a0),d0
-	move.w	10(a0),d3	;hg
-	sub.w	d0,d3
-
-	moveq.l	#0,d0
-	move.b	54(a0),d0	;x
-	moveq.l	#0,d1
-	move.b	55(a0),d1	;y
-
-	move.l  50(a0),a0
-	lea.l   NR,a1	;taglist
-
-	jsr     _LVODrawBevelBoxA(a6)
-
-	movem.l (sp)+,d0-d5/a0-a2/a6
-	rts
 
 
 CreatePrefsMsgport:
@@ -55712,7 +55588,7 @@ CreatePrefsMsgport:
 	sub.l	a1,a1
 	move.l	(PrefsAsmWinBase).l,a0
 	move.l	(GadToolsBase-DT,a4),a6
-	jsr	(_LVOGT_RefreshWindow,a6)		; ***
+	jsr	(_LVOGT_RefreshWindow,a6)
 	moveq.l	#0,d0
 	rts
 
@@ -55756,7 +55632,7 @@ OpenSyntColsWin:
 	add.b	($0023,a0),d3	;wbortop
 	lea	(Prefs_GList).l,a0
 	move.l	(GadToolsBase-DT,a4),a6
-	jsr	(_LVOCreateContext,a6)		; ***
+	jsr	(_LVOCreateContext,a6)
 	move.l	d0,a3
 	tst.l	d0
 	beq	.ProjectPrefsCError
@@ -55859,8 +55735,6 @@ OpenSyntColsWin:
 	move.l	(GadToolsBase-DT,a4),a6
 	jsr	_LVOGT_RefreshWindow(a6)
 
-	bsr	ProjectPrefswinRender
-
 	bsr	ShowPrevSource
 
 	moveq	#0,d0
@@ -55954,7 +55828,7 @@ ShowPrevSource:
 ;	dc.b	NORMAALSRC,29,09,'else',0
 ;	dc.b	NORMAALSRC,29,05,'rts',0
 	dc.b	OPCODECOLR,29,06,'endc',0
-	dc.b	OPCODECOLR,29,07,'bsr.w',0			; *** was brs
+	dc.b	OPCODECOLR,29,07,'bsr.w',0		; *** was brs
 	dc.b	NORMAALSRC,40,07,'P61_End',0
 	dc.b	OPCODECOLR,29,08,'rts',0
 	dc.b	COMMENTAAR,53,08,';no P61_SetRepeat',0
@@ -56114,7 +55988,8 @@ Prefs_File_Stuff:
 
 	dc.b	'!(.s|.asm|.i)',$A
 	dc.b	'*TRASH:',$A
-	dc.b	'|999|111|DDD|656|',$A	; default colors
+	dc.b	'|999|111|DDD|656|999|111|DDD|656'
+	dc.b	'|999|111|DDD|656|999|111|DDD|656|',$A	; default colors
 	dc.b	'[CPU0',$A
 	dc.b	'[MMU0',$A
 	dc.b	'^FFFFFFFF|00000100|00000280',$A
@@ -56131,20 +56006,302 @@ wt_txt:	dc.b	"Only set this option if scrolling",$a
 
 
 ;****************************************************
+;**                 CLIPBOARD STUFF                **
+;****************************************************
+;TODO:
+;	* actual error handling
+;	* preference to turn on/off
+;
+	IF	CLIPBOARD
+
+IFF_ParseIFF:
+	clr.l	ifflength
+
+	move.l	(IFFParseBase-DT,a4),a6
+	move.l	iffhandle,a0
+	moveq.l	#IFFF_READ,d0
+	jsr	_LVOOpenIFF(a6)
+	tst.l	d0
+	bne.w	IFF_FreeClip
+
+	move.l	iffhandle,a0
+	move.l	#'FTXT',d0
+	move.l	#'CHRS',d1
+	jsr	_LVOStopChunk(a6)
+	tst.l	d0
+	bne.w	IFF_CloseIFF
+
+	move.l	iffhandle,a0
+	move.l	#0,d0
+	jsr	_LVOParseIFF(a6)
+	cmpi.l	#IFFERR_EOF,d0
+	beq.w	.end
+
+	move.l	iffhandle,a0
+	jsr	_LVOCurrentChunk(a6)
+	;move.l	d0,iffcurrentchunk
+	tst.l	d0
+	beq.w	IFF_CloseIFF
+
+	move.l	d0,a0
+	cmpi.l	#'FTXT',cn_Type(a0)
+	bne.w	IFF_CloseIFF
+
+	cmpi.l	#'CHRS',cn_ID(a0)
+	bne.w	IFF_CloseIFF
+
+	cmpi.l	#0,cn_Size(a0)
+	beq.w	IFF_CloseIFF
+	move.l	cn_Size(a0),ifflength
+
+.end:	rts
+
+
+IFF_ReadToBuffer:	; a1 = string buffer
+	move.l	(IFFParseBase-DT,a4),a6
+	move.l	iffhandle,a0
+	move.l	ifflength,d0
+	jsr	_LVOReadChunkBytes(a6)
+	cmp.l	ifflength,d0
+	bne.w	IFF_CloseIFF
+	rts
+
+
+IFF_CloseIFF:
+	move.l	(IFFParseBase-DT,a4),a6
+	move.l	iffhandle,a0
+	jsr	_LVOCloseIFF(a6)
+	rts
+
+
+IFF_FreeClip:
+	move.l	(IFFParseBase-DT,a4),a6
+	move.l	cliphandle,a0
+	jsr	_LVOCloseClipboard(a6)
+	rts
+
+
+IFF_FreeIFF:
+	move.l	(IFFParseBase-DT,a4),a6
+	move.l	iffhandle,a0
+	jsr	_LVOFreeIFF(a6)
+	rts
+
+
+Clip_Setup:
+	movem.l	d0-a6,-(sp)
+
+	move.l	(IFFParseBase-DT,a4),a6
+	jsr	_LVOAllocIFF(a6)
+	tst.l	d0
+	beq.s	.end
+	move.l	d0,iffhandle
+
+	moveq.l	#PRIMARY_CLIP,d0
+	jsr	_LVOOpenClipboard(a6)
+	tst.l	d0
+	beq.w	IFF_FreeIFF
+	move.l	d0,cliphandle
+
+	move.l	iffhandle,a0
+	move.l	d0,iff_Stream(a0)
+	jsr	_LVOInitIFFasClip(a6)
+
+.end	movem.l	(sp)+,d0-a6
+	rts
+
+
+Clip_Cleanup:
+	movem.l	d0-a6,-(sp)
+
+	bsr.w	IFF_FreeClip
+	bsr.w	IFF_FreeIFF
+	bsr	closeifflib
+
+	movem.l	(sp)+,d0-a6
+	rts
+
+
+Clip_Write:	; a1 = string buffer, d0 = string buffer len
+	tst.l	d0
+	beq.w	.end			; empty string
+
+	move.l	a1,clipstartsave
+	move.l	d0,cliplength
+
+	move.l	(IFFParseBase-DT,a4),a6
+	move.l	iffhandle,a0
+	moveq.l	#IFFF_WRITE,d0
+	jsr	_LVOOpenIFF(a6)
+	tst.l	d0
+	bne.w	IFF_FreeClip
+
+	move.l	iffhandle,a0
+	move.l	#"FTXT",d0
+	move.l	#"FORM",d1
+	move.l	#IFFSIZE_UNKNOWN,d2
+	jsr	_LVOPushChunk(a6)
+	tst.l	d0
+	bne.w	IFF_CloseIFF
+
+	move.l	iffhandle,a0
+	moveq.l	#0,d0
+	move.l	#"CHRS",d1
+	move.l	#IFFSIZE_UNKNOWN,d2
+	jsr	_LVOPushChunk(a6)
+	tst.l	d0
+	bne.w	IFF_CloseIFF
+
+	bsr.w	Clip_BufferedWrite
+
+	move.l	iffhandle,a0
+	jsr	_LVOPopChunk(a6)
+	tst.l	d0
+	bne.w	IFF_CloseIFF
+
+	move.l	iffhandle,a0
+	jsr	_LVOPopChunk(a6)
+	;tst.l	d0
+	;bne.w	IFF_CloseIFF
+
+	bsr.w	IFF_CloseIFF
+.end:	rts
+
+
+Clip_BufferedWrite:
+	move.l	clipstartsave,a0
+	move.l	cliplength,d1
+
+.loop:	cmp.l	#$100,d1
+	ble.s	.le
+	move.l	#$100,d0		; bigger than buffer, so do first $100
+	bra.s	.write
+.le:	move.l	d1,d0
+
+.write:	bsr.w	Clip_FilterAndWrite	; convert #0s to newlines
+
+	movem.l	d0-d1/a0,-(sp)
+	move.l	iffhandle,a0
+	lea	Clip_Buffer,a1
+	jsr	_LVOWriteChunkBytes(a6)
+	movem.l	(sp)+,d0-d1/a0
+	;tst.l	d0
+	;ble.w	IFF_CloseIFF
+
+	sub.l	d0,d1
+	add.l	d0,a0
+	beq.w	.end
+	bra.s	.loop
+
+.end:	rts
+
+
+Clip_FilterAndWrite:	; a0 = src, d0 = len
+	movem.l	d0-d1/a0-a1,-(sp)
+	cmp.l	#$100,d0
+	bgt.w	.end			; too big for buffer
+
+	lea	Clip_Buffer,a1
+	moveq.l	#0,d1
+	subq.l	#1,d0			; subtract 1 for dbra
+.loop:	move.b	(a0)+,d1
+	cmp.b	#0,d1
+	bne.s	.next
+	move.b	#10,d1			; turn #0 into newline
+.next:	move.b	d1,(a1)+
+	dbra.s	d0,.loop
+
+.end:	movem.l	(sp)+,d0-d1/a0-a1
+	rts
+
+
+
+Clip_Read:	; a1 = buffer
+	move.l	a1,clipstartsave
+	bsr.w	IFF_ParseIFF
+
+	; TODO: check if there's enough space for paste
+
+	move.l	clipstartsave,a1
+	bsr.w	IFF_ReadToBuffer
+
+	move.l	clipstartsave,a0	; convert newline to #0
+	move.l	#10,d0
+	move.l	#0,d1
+	move.l	ifflength,d2
+	bsr.w	Clip_FilterChar
+
+	move.l	clipstartsave,a0
+	add.l	ifflength,a0
+	move.b	#$1A,(a0)
+	move.l	a0,(Cut_Buffer_End-DT,a4)
+
+	;move.l	iffhandle,a0
+	;jsr	_LVOCloseIFF(a6)
+	bsr.w	IFF_CloseIFF
+.end:	rts
+
+
+Clip_FilterChar:	; a0 = buffer
+	tst.l	d2	; d0 = char to find, d1 = char to replace, d2 = len
+	beq.s	.end
+
+	move.l	a0,a1
+	add.l	d2,a1			; a1 = end
+
+.loop:	move.b	(a0)+,d3
+	cmp.b	d0,d3
+	bne.s	.next
+	move.b	d1,-1(a0)
+
+.next:	cmp.l	a0,a1
+	beq.s	.end
+	bra.s	.loop
+
+.end:	rts
+
+
+cliplength:	dc.l	0
+clipstartsave:	dc.l	0
+ifflength:	dc.l	0
+cliphandle:	dc.l	0
+iffhandle:	dc.l	0
+
+Clip_ErrorCode:	dc.l	0
+Clip_ErrorTable:
+	dc.l	0
+;	dc.l	ascii.MSG29
+;	dc.l	ascii.MSG30
+;	dc.l	ascii.MSG31
+;	dc.l	ascii.MSG32
+;	dc.l	OpenIFFforrea.MSG
+;	dc.l	Failedobtaini.MSG
+;	dc.l	ErroropeningC.MSG
+;	dc.l	OpenIFFforwri.MSG
+;	dc.l	ErrorwritingF.MSG
+;	dc.l	ErrorwritingC.MSG
+;	dc.l	Failedtowrite.MSG
+;	dc.l	ErrorclosingC.MSG
+;	dc.l	ErrorclosingF.MSG
+;	dc.l	Therewasnothi.MSG
+;	dc.l	Failedtoinsta.MSG
+;	dc.l	Notenoughmemo.MSG
+;	dc.l	Failedtoreadf.MSG
+;	dcb.l	10,0
+
+Clip_Buffer:	dcb.b	$100
+
+	ENDIF
+;****************************************************
+;**               END CLIPBOARD STUFF              **
+;****************************************************
+
+
+;****************************************************
 ;**              MY DEBUG SUBROUTINES              **
 ;****************************************************
 
 	IF	Debugstuff
-
-test_num:
-	movem.l	d0-a6,-(sp)
-	jsr	druk_af_d0
-	jsr	Druk_af_eol
-	movem.l	(sp)+,d0-a6
-	move	#$00F0,($00DFF180).l
-	btst	#6,($00BFE001).l
-	bne.w	test1
-	rts
 
 test_debug:
 	movem.l	d0-a6,-(sp)
@@ -56252,35 +56409,11 @@ regstxt:
 	dc.b	"(A5):....................",$a
 	dc.b	"(A6):....................",$a
 	dc.b	"(sp):....................",$a
-
 	dc.b	0
+	even
 
-	cnop	0,4
-test1:
-	move	#$00F0,($00DFF180).l
-	btst	#6,($00BFE001).l
-	bne.b	test1
-	rts
 
-test2:
-	move	#$000F,($00DFF180).l
-	btst	#10,($00DFF016).l
-	bne.b	test2
-	rts
-
-test3:
-	move	#$0F0F,($00DFF180).l
-	btst	#7,($00BFE001).l
-	bne.b	test3
-	rts
-
-test4:
-	move	#$0F00,($00DFF180).l
-	btst	#6,($00BFE001).l
-	bne.b	test4
-	rts
-
-	endif
+	endif	; Debugstuff
 
 
 ;;*******************************************************
@@ -56288,6 +56421,126 @@ test4:
 ;********************************************************
 
 	Section	disassembler,code
+
+	IF	DISLIB
+
+DL_Disassemble:		; a1 = start addr, a2 = end addr
+	move.w	#0,DL_Pos
+	move.b	#0,DL_Bits
+
+	lea	(DisassemblyBuffer-DT,a4),a0
+	move.l	a0,DL_BufferPos
+
+	lea	DL_Data,a0
+	move.l	a1,ds_From(a0)
+	move.l	a2,ds_UpTo(a0)
+
+	move.l	(DislibBase-DT,a4),a6
+	jsr	_LVODisassemble(a6)
+	move.l	d0,DL_NextPC
+
+	bsr.w	DL_PrintBuffer
+	rts
+
+
+DL_PrintBuffer:
+	move.l	DL_BufferPos,a0
+	move.b	#0,(a0)			; terminate string
+
+	lea	(DisassemblyBuffer-DT,a4),a0
+	jsr	Print_Text
+	rts
+
+
+DL_DisassembleLine:	; a1 = the address
+	move.l	#0,a2
+	bsr.w	DL_Disassemble
+	rts
+
+
+DL_PutChar:
+	add.w	#1,DL_Pos
+	bsr.w	DL_ParseOutput
+	cmp.b	#-1,d0
+	beq.s	.exit
+
+	bsr.w	DL_CharToUpper
+
+	move.l	DL_BufferPos,a0
+	move.b	d0,(a0)+
+	move.l	a0,DL_BufferPos
+
+	;bra	KPutChar
+.exit:	rts
+
+
+DL_ParseOutput:
+	cmp.b	#10,d0			; NEWLINE
+	bne.s	.comm
+	move.w	#0,DL_Pos
+	move.b	#0,DL_Bits
+	bra.s	.end
+
+.comm:	btst	#DL_COMMENT,DL_Bits
+	bne.s	.skip
+
+	cmp.b	#";",d0
+	bne.s	.pos
+	bset	#DL_COMMENT,DL_Bits
+	bra.s	.skip
+
+.pos:	move.w	DL_Pos,d1
+	cmp.w	#8,d1
+	ble.s	.end
+
+	cmp.w	#9,d1
+	beq.s	.spc
+
+	cmp.w	#13,d1
+	bge.s	.end
+	bra.s	.skip
+
+.spc:	move.b	#" ",d0
+	bra.s	.end
+
+.skip:	move.b	#-1,d0
+.end:	rts
+
+
+KPutChar:
+	move.l	a6,-(sp)
+	move.l	(4).w,a6
+	jsr	_LVORawPutChar(a6)
+	move.l	(sp)+,a6
+	rts
+
+DL_CharToUpper:
+	cmp.b	#"z",d0
+	bgt.s	.end
+	cmp.b	#"a",d0
+	blt.s	.end
+	sub.b	#" ",d0
+.end:	rts
+
+
+DL_BufferPos:	dc.l	0
+DL_NextPC:	dc.l	0
+DL_Pos:		dc.w	0
+DL_Bits:	dc.b	0
+		even
+DL_COMMENT	EQU	0
+DL_Data:
+	dc.l	0			; ds_From
+	dc.l	0			; ds_UpTo
+	dc.l	0			; ds_PC
+	dc.l	DL_PutChar		; ds_PutProc
+	dc.l	0			; ds_UserData
+	dc.l	0			; ds_UserBase
+	dc.w	0			; ds_Truncate
+	dc.w	0			; ds_reserved
+
+	ENDIF	; DISLIB
+
 
 ;gedoe:	dc.l	$F6209000
 ;teste:	lea	gedoe,a5
@@ -56580,7 +56833,6 @@ C1FBC4:
 	bra	LEN_NUM_B	;WORD
 ;	addq.w	#2,a5		;BYTE?
 ;	addq.w	#2,d1
-;	jsr	test_debug
 ;	rts
 
 C1FBEA:
@@ -56852,7 +57104,6 @@ LEN_NUM_L:
 	rts
 
 ;LEN_ABS_L:
-;	jsr	test_debug
 ;	addq.w	#6,d1
 ;	addq.w	#6,a5
 ;	rts
@@ -56876,7 +57127,7 @@ LEN_BRANCH_B:
 	rts
 
 Diss_zetom2ascii:
-	bsr.b	C1FE7E
+	bsr.b	Disassemble
 	clr.b	(B29B92-DT,a4)
 	cmp	#10,d1
 	ble.b	C1FE58
@@ -56901,9 +57152,9 @@ C1FE62:
 .klaar:
 	rts
 
-C1FE7E:
-	lea	(B29B93-DT,a4),a3	;Outputbuffer for complete disassembly
-	lea	(L2EB86-DT,a4),a0	;Outputbuffer for temp. dissasembly
+Disassemble:
+	lea	(DisassemblyBuffer-DT,a4),a3 ; buffer for complete disassembly
+	lea	(L2EB86-DT,a4),a0	     ; buffer for temp. dissasembly
 
 	move.l	a5,-(sp)
 	move	(a5)+,d0
@@ -57019,7 +57270,6 @@ C1FF66:
 	bne.b	C1FF72
 	lea	(BSBCLSLCSSSCA.MSG,pc),a2
 	moveq	#$1E,d6
-;	jsr	test_debug
 
 	bra.b	C1FF7E
 
@@ -57028,7 +57278,6 @@ C1FF72:
 	bne	C20008
 	moveq	#$7E,d6
 	lea	(FEQOGTOGEOLTO.MSG,pc),a2
-;	jsr	test_debug
 
 C1FF7E:
 	cmp.b	#$42,(B29B94-DT,a4)
@@ -57136,7 +57385,7 @@ C2002C:
 	move.b	#$BB,(B29BC3-DT,a4)
 	clr.b	(B29BC4-DT,a4)
 C20046:
-	lea	(B29B93-DT,a4),a0
+	lea	(DisassemblyBuffer-DT,a4),a0
 	move.l	a5,d1
 	move.b	(sp)+,d2
 	cmp.b	#2,d2
@@ -57160,7 +57409,6 @@ BSBCLSLCSSSCA.MSG:
 	dc.b	'GC  CS  CC  '
 
 C20140:
-;		jsr	test_debug
 	tst.b	d0
 	bmi.b	C2014E
 	move	(a0),d5	;WORD1 bits2-0
@@ -59819,6 +60067,8 @@ ResponsePtr:	ds.l	1
 
 GadToolsBase:	ds.l	1
 AslBase:	ds.l	1
+IFFParseBase:	ds.l	1
+DislibBase:	ds.l	1
 
 WorkBuffer1:	ds.w	1
 WorkBuffer2:	ds.b	1
@@ -59892,15 +60142,15 @@ DATA_RETURNMSG:	ds.l	1
 DATA_TASKPTR:	ds.l	1
 
 MEMDIR_ANTAL:	ds.w	1
-DAIRYIN:	ds.w	1
-DAIRYOUT:	ds.w	1
+DIARYIN:	ds.w	1
+DIARYOUT:	ds.w	1
 
 ;***  Memory Area Pointers  ***
 
 LAST_LABEL_ADDRESS:	ds.l	1
 WORK_START:	ds.l	1
-sourcestart:	ds.l	1
-sourceend:	ds.l	1
+SourceStart:	ds.l	1
+SourceEnd:	ds.l	1
 LabelStart:	ds.l	1
 LPtrsEnd:	ds.l	1
 LabelEnd:	ds.l	1
@@ -59908,7 +60158,7 @@ DEBUG_END:	ds.l	1
 RelocStart:	ds.l	1
 RelocEnd:	ds.l	1
 CodeStart:	ds.l	1
-Cut_Blok_End:	ds.l	1
+Cut_Buffer_End:	ds.l	1
 WORK_ENDTOP:	ds.l	1
 WORK_END:	ds.l	1
 
@@ -59989,7 +60239,8 @@ DEBUG_NUMOFADDS:ds.w	1
 
 DIS_PRINT_BUFFER_0:	ds.b	20	;buffer voor adres in ascii
 B29B92:		ds.b	1
-B29B93:		ds.b	1
+DisassemblyBuffer:
+		ds.b	1
 
 B29B94:		ds.b	$002F
 B29BC3:		ds.b	1
@@ -60143,11 +60394,14 @@ DATA_REPLYPORT:		ds.l	8
 ;***  Keyboard data area  ***
 
 KeyboardInBuf:	ds.b	1
-KeyboardInBufByte:ds.b	1
+KeyboardInBufByte:
+		ds.b	1
 KeyboardOutBuf:	ds.b	1
-KeyboardOutBufByte:ds.b	1
+KeyboardOutBufByte:
+		ds.b	1
 KEYB_KILLPTR:	ds.b	1
-KEYB_KILLPTRByte:ds.b	1
+KEYB_KILLPTRByte:
+		ds.b	1
 
 OwnKeyBuffer:	ds.l	$0040	;256 bytes
 edit_EscCode:	ds.b	2
@@ -60244,18 +60498,18 @@ L2E4DE:		ds.l	1
 L2E4E2:		ds.l	1
 L2E4E6:		ds.l	1
 L2E4EA:		ds.l	1
-L2E4EE:		ds.l	1
-L2E4F2:		ds.l	1
+RegsFileBuffer:	ds.l	1
+RegsFile:	ds.l	1
 LastFoundLine:	ds.b	2
-OldCursorpos:	ds.l	1	;was ds.w 1
-OldLinePos: 	ds.l	1	;was ds.w 2 ?!
+OldCursorpos:	ds.l	1		; was ds.w 1
+OldLinePos: 	ds.l	1		; was ds.w 2 ?!
 LocalBufPtr:	ds.l	1
 Marksinsource:	ds.w	1
 CPU_type:	ds.w	2
 W2E508:		ds.w	1
 PrefsGedoe:	ds.w	1
-SaveBin_Start:	ds.l	1		; ***
-SaveBin_End:	ds.l	1		; ***
+SaveBin_Start:	ds.l	1
+SaveBin_End:	ds.l	1
 Mon_Notif_Addr:	ds.w	1		; *** Must refresh the address later
 Parse_AdrValue:	ds.w	1
 Parse_AdrValueSizePlus2:
@@ -60270,9 +60524,9 @@ AsmEindeErrorTable:
 Asm_LastErrorPos:
 		ds.l	1
 PrevDirnames:
-		ds.b	128	;normal read/write
-		ds.b	128	;object/binary etc..
-		ds.b	128	;insert
+		ds.b	128		; normal read/write
+		ds.b	128		; object/binary etc..
+		ds.b	128		; insert
 
 LastFileNaam:	ds.l	$0040
 ProjectName:	ds.l	$0040
@@ -60283,11 +60537,8 @@ L2EB04:		ds.l	$0010
 ;		ds.l	$0010
 ;		ds.w	1
 L2EB86:		ds.l	15
-L2EBC2:		ds.l	$0013
-		ds.w	1
-L2EC10:		ds.w	1
-RegelPtrsIn:	ds.l	128
-RegelPtrsOut:	ds.l	128
+LinePtrsIn:	ds.l	128
+LinePtrsOut:	ds.l	128
 VBR_base_ofzo:	ds.l	1
 VBR_Base2:	ds.l	1
 LoopPtr:	ds.l	10
@@ -60302,7 +60553,7 @@ PR_GadgetAdr:	ds.l	1
 L2F056:		ds.l	1
 PrefsAsmWinBase:ds.l	1
 Prefs_GList:	ds.l	1
-Prefs_Gadgets:	ds.l	env_gadcount	;$21
+Prefs_Gadgets:	ds.l	env_gadcount	; $21
 GadgetBuffer:	ds.l	7
 		ds.w	1
 Prefs_msgport:	ds.l	1
@@ -60313,7 +60564,7 @@ L2F118:		ds.l	1
 L2F11C:		ds.l	1
 L2F120:		ds.l	1
 L2F124:		ds.l	1
-L2F128:		ds.l	1
+RegsFileSize:	ds.l	1
 L2F12C:		ds.l	1
 L2F130:		ds.l	1
 Comm_menubase:	ds.l	1
@@ -60355,11 +60606,11 @@ AssmblrStatus:
 		ds.w	1
 D02F258:	ds.d	0
 		ds.s	1
-		ds.l	1	;ditte
+		ds.l	1		; ditte
 D02F260:	ds.d	0
 		ds.d	0
 		ds.s	1
-		ds.l	2	;end ditte
+		ds.l	2		; end ditte
 L2F26C:		ds.l	1
 B2F270:		ds.b	1
 B2F271:		ds.b	1
@@ -60419,10 +60670,9 @@ BlokBackwards:	ds.b	1
 B30042:		ds.b	1
 SomeBits3_backup:
 		ds.b	1
-Prefs_tiepe:	ds.b	1
+PrefsType:	ds.b	1
 menu_tiepe:	ds.b	1
 markblockset:	ds.b	1
-B30047:		ds.b	1
 B30048:		ds.b	1
 B30049:		ds.b	1
 B3004A:		ds.b	1
@@ -60436,6 +60686,7 @@ Animate:	ds.b	1
 FromCmdLine:	ds.b	1
 
 B30053:		ds.b	15
+	even
 L30062:		ds.l	3
 		ds.w	1
 		ds.b	1
@@ -60491,7 +60742,7 @@ MyBits:		ds.b	1
 ScBits:		ds.b	1
 	even
 ScColor:		ds.w	1
-regel_buffer:	ds.b	256
+line_buffer:	ds.b	256
 markkeys:	ds.b	10
 
 realend5:
@@ -60505,14 +60756,7 @@ EndVarBase:
 
 TRASHlogo:
 	inciff  pics/trashm-pro-492x93x2.iff,RN
-endlogo:
 
 	END
 
-
 4colorpal:	dc.w	$999,$000,$ddd,$656
-
-solaris colors:
-pink:	178,77,122	$b24d7a	$b58
-darkp:	87,76,144	$574c90	$559
-lightp:	130,119,186	$8277bb	$87c
