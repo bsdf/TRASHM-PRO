@@ -1,0 +1,30 @@
+;APS00000164000001640000016400000164000001640000016400000164000001640000016400000164
+KPRINTLNX: MACRO
+	movem.l	d0-a6,-(sp)
+	move.l	#.a\2,a0
+	move.l	#0,a1
+	jsr	KPrintF
+	bra.s	.b\2
+.a\2:	dc.b	\1
+	dc.b	$a,0
+	even
+.b\2:	movem.l	(sp)+,d0-a6
+	ENDM
+
+; bullshit since \@ seems to be broken
+KPRINTLN: MACRO
+	KPRINTLNX \1,1
+	ENDM
+
+KPRINTLN2: MACRO
+	KPRINTLNX \1,2
+	ENDM
+
+KPRINTLN3: MACRO
+	KPRINTLNX \1,3
+	ENDM
+
+KPRINTLN4: MACRO
+	KPRINTLNX \1,4
+	ENDM
+
